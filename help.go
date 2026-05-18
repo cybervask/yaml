@@ -56,12 +56,12 @@ func HelpStr(v any) string {
 				continue
 			}
 
-			// Extract accurate map keys matching yaml annotations or default to lowercase attributes names
+			// Get yaml key name or fallback to lowercase field name
 			yamlName := field.Tag.Get("yaml")
 			if yamlName == "" {
 				yamlName = strings.ToLower(field.Name)
 			} else {
-				// ИСПРАВЛЕНО: берем первый элемент слайса (индекс 0) после разделения по запятой
+				// Correctly extract the first element as the actual key name
 				yamlParts := strings.Split(yamlName, ",")
 				yamlName = yamlParts[0]
 			}
