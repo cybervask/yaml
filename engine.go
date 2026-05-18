@@ -351,7 +351,7 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 					minVal, _ := strconv.ParseFloat(minStr, 64)
 					maxVal, _ := strconv.ParseFloat(maxStr, 64)
 					if val < minVal || val > maxVal {
-						return fmt.Errorf("field %s: value %f out of range [%s..%s]", currentPath, val, minVal, maxVal)
+						return fmt.Errorf("field %s: value %f out of range [%f..%f]", currentPath, val, minVal, maxVal)
 					}
 				}
 			}
