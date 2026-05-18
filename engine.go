@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -11,11 +12,13 @@ import (
 	"time"
 )
 
+// durationType caches the reflect.Type of time.Duration for efficient type matching.
 var durationType = reflect.TypeOf(time.Duration(0))
 
-// SetDefaults parses structural models, evaluating properties recursively to populate uninitialized
-// zero-state properties with raw matching default configurations declared inside `default` struct tag parameters.
-// Returns an error compilation boundary if structural designs contain logically conflicting 'default' and 'not_empty' tags.
+// SetDefaults recursively walks through the struct fields via a pointer and fills
+// uninitialized zero-value fields with the data defined in the `default` struct tag.
+// It also evaluates system environment variables via the `env` tag, which take absolute priority.
+// Returns an error if there is a design conflict where both 'default' and 'not_empty' are present on the same field.
 func SetDefaults(ptr interface{}) error {
 	v := reflect.ValueOf(ptr)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
@@ -24,6 +27,7 @@ func SetDefaults(ptr interface{}) error {
 	return setDefaultsValue(v.Elem())
 }
 
+// setDefaultsValue performs the underlying recursive assignment of defaults and environment overrides.
 func setDefaultsValue(v reflect.Value) error {
 	switch v.Kind() {
 	case reflect.Struct:
@@ -33,15 +37,19 @@ func setDefaultsValue(v reflect.Value) error {
 			fieldType := t.Field(i)
 
 			validateTag, hasValidate := fieldType.Tag.Lookup("validate")
-			_, hasDefault := fieldType.Tag.Lookup("default")
+			defaultValStr, hasDefault := fieldType.Tag.Lookup("default")
+
+			// Validation of architectural design conflict during tag planning
 			if hasDefault && hasValidate && strings.Contains(validateTag, "not_empty") {
 				return fmt.Errorf("field %s is invalid: 'default' and 'not_empty' are mutually exclusive", fieldType.Name)
 			}
 
+			// Smart bypass for inner library marker structure
 			if fieldType.Anonymous && fieldType.Type == reflect.TypeOf(Includer{}) {
 				continue
 			}
 
+			// Legacy generic Value property evaluation fallback support
 			if fieldType.Name == "Value" {
 				if err := setDefaultsValue(fieldVal); err != nil {
 					return err
@@ -49,23 +57,62 @@ func setDefaultsValue(v reflect.Value) error {
 				continue
 			}
 
-			if fieldVal.Kind() == reflect.Struct || fieldVal.Kind() == reflect.Slice || fieldVal.Kind() == reflect.Map {
+			// Smart allocation and parsing for uninitialized slices (e.g. default:"h2,http/1.1")
+			if fieldVal.Kind() == reflect.Slice {
+				if hasDefault && fieldVal.IsZero() {
+					if fieldVal.Type().Elem().Kind() == reflect.String {
+						elements := strings.Split(defaultValStr, ",")
+						sliceValues := reflect.MakeSlice(fieldVal.Type(), len(elements), len(elements))
+						for idx, elem := range elements {
+							sliceValues.Index(idx).SetString(strings.TrimSpace(elem))
+						}
+						fieldVal.Set(sliceValues)
+					}
+				}
 				if err := setDefaultsValue(fieldVal); err != nil {
 					return err
 				}
 				continue
 			}
 
-			defaultValStr, hasDefault := fieldType.Tag.Lookup("default")
-			if !hasDefault {
+			// Deep recursive processing step for downstream inner structs and maps
+			if fieldVal.Kind() == reflect.Struct || fieldVal.Kind() == reflect.Map {
+				if err := setDefaultsValue(fieldVal); err != nil {
+					return err
+				}
 				continue
 			}
 
-			if fieldVal.IsZero() {
+			// Processing env and default tags for primitive fields types
+			envVarName := fieldType.Tag.Get("env")
+
+			var targetValStr string
+			var hasValueToSet bool
+
+			// Priority 1: System environment variable evaluation override
+			if envVarName != "" {
+				if envVal, isSet := os.LookupEnv(envVarName); isSet && envVal != "" {
+					targetValStr = envVal
+					hasValueToSet = true
+				}
+			}
+
+			// Priority 2: Fallback to tag default configuration definition literal string
+			if !hasValueToSet && hasDefault {
+				targetValStr = defaultValStr
+				hasValueToSet = true
+			}
+
+			// Determine if a live environment variable requires an explicit override layer
+			// over an already unmarshaled parameter value block
+			isEnvOverride := envVarName != "" && os.Getenv(envVarName) != ""
+
+			if hasValueToSet && (fieldVal.IsZero() || isEnvOverride) {
+				// Special duration parsing string adapter wrapper
 				if fieldVal.Type() == durationType {
-					d, err := time.ParseDuration(defaultValStr)
+					d, err := time.ParseDuration(targetValStr)
 					if err != nil {
-						return fmt.Errorf("invalid duration %q for field %s", defaultValStr, fieldType.Name)
+						return fmt.Errorf("invalid duration %q for field %s", targetValStr, fieldType.Name)
 					}
 					fieldVal.Set(reflect.ValueOf(d))
 					continue
@@ -73,19 +120,19 @@ func setDefaultsValue(v reflect.Value) error {
 
 				switch fieldVal.Kind() {
 				case reflect.String:
-					fieldVal.SetString(defaultValStr)
+					fieldVal.SetString(targetValStr)
 				case reflect.Bool:
-					b, err := strconv.ParseBool(defaultValStr)
+					b, err := strconv.ParseBool(targetValStr)
 					if err == nil {
 						fieldVal.SetBool(b)
 					}
 				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-					n, err := strconv.ParseInt(defaultValStr, 10, 64)
+					n, err := strconv.ParseInt(targetValStr, 10, 64)
 					if err == nil {
 						fieldVal.SetInt(n)
 					}
 				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-					n, err := strconv.ParseUint(defaultValStr, 10, 64)
+					n, err := strconv.ParseUint(targetValStr, 10, 64)
 					if err == nil {
 						fieldVal.SetUint(n)
 					}
@@ -97,16 +144,34 @@ func setDefaultsValue(v reflect.Value) error {
 		for i := 0; i < v.Len(); i++ {
 			element := v.Index(i)
 			if element.Kind() == reflect.Ptr {
-				element = element.Elem()
+				if !element.IsNil() {
+					if err := setDefaultsValue(element.Elem()); err != nil {
+						return err
+					}
+				}
+				continue
 			}
-			if err := setDefaultsValue(element); err != nil {
-				return err
+			if element.Kind() == reflect.Struct {
+				copyElem := reflect.New(element.Type()).Elem()
+				copyElem.Set(element)
+				if err := setDefaultsValue(copyElem); err != nil {
+					return err
+				}
+				v.Index(i).Set(copyElem)
 			}
 		}
 
 	case reflect.Map:
 		for _, key := range v.MapKeys() {
 			element := v.MapIndex(key)
+			if element.Kind() == reflect.Ptr {
+				if !element.IsNil() {
+					if err := setDefaultsValue(element.Elem()); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			if element.Kind() == reflect.Struct {
 				copyElem := reflect.New(element.Type()).Elem()
 				copyElem.Set(element)
@@ -114,17 +179,14 @@ func setDefaultsValue(v reflect.Value) error {
 					return err
 				}
 				v.SetMapIndex(key, copyElem)
-			} else if element.Kind() == reflect.Ptr {
-				if err := setDefaultsValue(element.Elem()); err != nil {
-					return err
-				}
 			}
 		}
 	}
 	return nil
 }
 
-// Isolate internal parameter segments properly (handles structural rules mapping blocks with embedded values).
+// parseValidateTag tokenizes the validation tag string into separate rule mappings.
+// It keeps internal values isolated even if they contain punctuation like commas (e.g. inside regex patterns).
 func parseValidateTag(tag string) map[string]string {
 	rules := make(map[string]string)
 	if tag == "" {
@@ -206,61 +268,32 @@ func Validate(ptr interface{}) error {
 	if v.Kind() != reflect.Ptr || v.IsNil() {
 		return nil
 	}
-	return validateValue(v.Elem(), "")
+	return validateValue(v.Elem(), "", nil)
 }
 
-func validateValue(v reflect.Value, fieldNamePrefix string) error {
-	switch v.Kind() {
-	case reflect.Struct:
-		t := v.Type()
-		for i := 0; i < v.NumField(); i++ {
-			fieldVal := v.Field(i)
-			fieldType := t.Field(i)
+// validateValue performs the automated constraint checks down the configuration node hierarchy tree.
+func validateValue(v reflect.Value, currentPath string, rules map[string]string) error {
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return nil
+		}
+		v = v.Elem()
+	}
 
-			currentPath := fieldType.Name
-			if fieldNamePrefix != "" {
-				currentPath = fieldNamePrefix + "." + fieldType.Name
-			}
+	// Step 1: Evaluate validation constraint rules over the CURRENT node value scope
+	if len(rules) > 0 {
+		if _, hasNotEmpty := rules["not_empty"]; hasNotEmpty && v.IsZero() {
+			return fmt.Errorf("field %s: is empty, but required by 'not_empty'", currentPath)
+		}
 
-			if fieldType.Anonymous && fieldType.Type == reflect.TypeOf(Includer{}) {
-				continue
-			}
+		isCollectionElement := strings.Contains(currentPath, "[")
+		minStr, hasMin := rules["min"]
 
-			if fieldType.Name == "Value" {
-				if err := validateValue(fieldVal, fieldNamePrefix); err != nil {
-					return err
-				}
-				continue
-			}
-
-			if fieldVal.Kind() == reflect.Struct || fieldVal.Kind() == reflect.Slice || fieldVal.Kind() == reflect.Map {
-				if err := validateValue(fieldVal, currentPath); err != nil {
-					return err
-				}
-				continue
-			}
-
-			validateTag, hasValidate := fieldType.Tag.Lookup("validate")
-			if !hasValidate {
-				continue
-			}
-
-			rules := parseValidateTag(validateTag)
-
-			if _, hasNotEmpty := rules["not_empty"]; hasNotEmpty && fieldVal.IsZero() {
-				return fmt.Errorf("field %s: is empty, but required by 'not_empty'", currentPath)
-			}
-
-			kind := fieldVal.Kind()
-			if fieldVal.IsZero() {
-				// Строки, слайсы, мапы, указатели при IsZero() можно пропускать, если нет not_empty
-				if kind == reflect.String || kind == reflect.Slice || kind == reflect.Map || kind == reflect.Ptr {
-					continue
-				}
-			}
-
-			if choiceStr, hasChoice := rules["choice"]; hasChoice && fieldVal.Kind() == reflect.String {
-				valStr := fieldVal.String()
+		if v.IsZero() && !isCollectionElement && !hasMin {
+			// Skip unassigned optional static fields safely if no explicit boundaries constraint exists
+		} else {
+			if choiceStr, hasChoice := rules["choice"]; hasChoice && v.Kind() == reflect.String {
+				valStr := v.String()
 				allowedChoices := strings.Split(choiceStr, ",")
 				isBlacklist := true
 				for _, c := range allowedChoices {
@@ -292,8 +325,8 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 				}
 			}
 
-			if expr, hasRegexp := rules["regexp"]; hasRegexp && fieldVal.Kind() == reflect.String {
-				valStr := fieldVal.String()
+			if expr, hasRegexp := rules["regexp"]; hasRegexp && v.Kind() == reflect.String {
+				valStr := v.String()
 				re, err := regexp.Compile(expr)
 				if err != nil {
 					return fmt.Errorf("field %s: invalid regular expression syntax %q: %w", currentPath, expr, err)
@@ -303,8 +336,8 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 				}
 			}
 
-			if _, hasHostPort := rules["host_port"]; hasHostPort && fieldVal.Kind() == reflect.String {
-				valStr := fieldVal.String()
+			if _, hasHostPort := rules["host_port"]; hasHostPort && v.Kind() == reflect.String {
+				valStr := v.String()
 				host, port, err := net.SplitHostPort(valStr)
 				if err != nil {
 					return fmt.Errorf("field %s: value %q is not a valid host:port format: %w", currentPath, valStr, err)
@@ -320,8 +353,8 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 				}
 			}
 
-			if _, hasURL := rules["url"]; hasURL && fieldVal.Kind() == reflect.String {
-				valStr := fieldVal.String()
+			if _, hasURL := rules["url"]; hasURL && v.Kind() == reflect.String {
+				valStr := v.String()
 				if !strings.Contains(valStr, "://") {
 					return fmt.Errorf("field %s: value %q is missing a URL scheme separator (e.g., scheme://host)", currentPath, valStr)
 				}
@@ -334,20 +367,19 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 				}
 			}
 
-			minStr, hasMin := rules["min"]
 			maxStr, hasMax := rules["max"]
 			if hasMin && hasMax {
-				kind := fieldVal.Kind()
+				kind := v.Kind()
 				switch {
 				case kind >= reflect.Int && kind <= reflect.Int64:
-					val := fieldVal.Int()
+					val := v.Int()
 					minVal, _ := strconv.ParseInt(minStr, 10, 64)
 					maxVal, _ := strconv.ParseInt(maxStr, 10, 64)
 					if val < minVal || val > maxVal {
 						return fmt.Errorf("field %s: value %d out of range [%s..%s]", currentPath, val, minStr, maxStr)
 					}
 				case kind >= reflect.Uint && kind <= reflect.Uint64:
-					val := fieldVal.Uint()
+					val := v.Uint()
 					minInt, _ := strconv.ParseInt(minStr, 10, 64)
 					maxInt, _ := strconv.ParseInt(maxStr, 10, 64)
 					if minInt < 0 || maxInt < 0 {
@@ -357,7 +389,7 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 						return fmt.Errorf("field %s: value %d out of range [%s..%s]", currentPath, val, minStr, maxStr)
 					}
 				case kind == reflect.Float32 || kind == reflect.Float64:
-					val := fieldVal.Float()
+					val := v.Float()
 					minVal, _ := strconv.ParseFloat(minStr, 64)
 					maxVal, _ := strconv.ParseFloat(maxStr, 64)
 					if val < minVal || val > maxVal {
@@ -366,14 +398,47 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 				}
 			}
 		}
+	}
+
+	// Step 2: Traverse downstream recursively based on structural target types topology
+	switch v.Kind() {
+	case reflect.Struct:
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			fieldVal := v.Field(i)
+			fieldType := t.Field(i)
+
+			nextPath := fieldType.Name
+			if currentPath != "" {
+				nextPath = currentPath + "." + fieldType.Name
+			}
+
+			if fieldType.Anonymous && fieldType.Type == reflect.TypeOf(Includer{}) {
+				continue
+			}
+
+			if fieldType.Name == "Value" {
+				if err := validateValue(fieldVal, currentPath, rules); err != nil {
+					return err
+				}
+				continue
+			}
+
+			var fieldRules map[string]string
+			if validateTag, hasValidate := fieldType.Tag.Lookup("validate"); hasValidate {
+				fieldRules = parseValidateTag(validateTag)
+			}
+
+			if err := validateValue(fieldVal, nextPath, fieldRules); err != nil {
+				return err
+			}
+		}
 
 	case reflect.Slice:
 		for i := 0; i < v.Len(); i++ {
 			element := v.Index(i)
-			if element.Kind() == reflect.Ptr {
-				element = element.Elem()
-			}
-			if err := validateValue(element, fmt.Sprintf("%s[%d]", fieldNamePrefix, i)); err != nil {
+			indexedPath := fmt.Sprintf("%s[%d]", currentPath, i)
+			if err := validateValue(element, indexedPath, rules); err != nil {
 				return err
 			}
 		}
@@ -381,13 +446,12 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 	case reflect.Map:
 		for _, key := range v.MapKeys() {
 			element := v.MapIndex(key)
-			if element.Kind() == reflect.Ptr {
-				element = element.Elem()
-			}
-			if err := validateValue(element, fmt.Sprintf("%s[%v]", fieldNamePrefix, key.Interface())); err != nil {
+			indexedPath := fmt.Sprintf("%s[%v]", currentPath, key.Interface())
+			if err := validateValue(element, indexedPath, rules); err != nil {
 				return err
 			}
 		}
 	}
+
 	return nil
 }
