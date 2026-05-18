@@ -1,12 +1,31 @@
-# Smart Go-YAML Engine [![Go CI/CD Pipeline](https://github.com/cybervask/yaml/badges/main/pipeline.svg)](https://github.com/cybervask/yaml/-/pipelines)
+# Smart Go-YAML Engine  
+
+[![Go CI/CD Pipeline](https://github.com/cybervask/yaml/actions/workflows/go.yml/badge.svg)](https://github.com/cybervask/yaml/actions/workflows/go.yml)
 
 Other languages: [Русский (RU)](README.ru.md) | [中文 (ZH)](README.zh.md)
 
-A robust, high-performance drop-in replacement for `go.yaml.in/yaml/v4`. It preserves original function signatures and core options (`Option`) while automatically integrating deep recursive fields defaults (`default:"value"`) and strict tag-based environment validation (`validate:"..."`) right into the parsing layer.
+A robust, high-performance drop-in replacement for `go.yaml.in/yaml/v4`. It preserves original function signatures and core options (`Option`) while automatically integrating deep recursive field defaults (`default:"value"`) and strict tag-based environment validation (`validate:"..."`) right into the parsing layer.
 
 ---
 
-## 🛠 Configuration Profiles (Valid & Invalid Cases)
+## Available Validation Rules
+
+You can combine multiple validation rules inside the `validate` tag using a comma separator (e.g., `validate:"not_empty,host_port"`).
+
+
+| Rule                   | Syntax Example                     | Description                                                                                                                | Supported Types                             |
+|:-----------------------|:-----------------------------------|:---------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------|
+| **Required Field**     | `validate:"not_empty"`             | Ensures the field is assigned a non-zero value. Mutually exclusive with the `default` tag.                                 | `string`, `struct`, `slice`, `map`, numbers |
+| **Whitelist Choices**  | `validate:"choice=dev,stage,prod"` | **Whitelist mode:** The string value must perfectly match one of the comma-separated tokens.                               | `string`                                    |
+| **Blacklist Choices**  | `validate:"choice=!red,!black"`    | **Blacklist mode:** Allows any string value except for the specific exclusion tokens prefixed with `!`.                    | `string`                                    |
+| **Numeric Range**      | `validate:"min=1,max=100"`         | Enforces strict lower and upper boundaries. Automatically blocks negative parameters for `uint` fields.                    | `int`, `uint`, `float` variants             |
+| **Regular Expression** | `validate:"regexp=^[a-z]{2,4}$"`   | Validates string layout matching a regular expression pattern. Safe against embedded commas.                               | `string`                                    |
+| **Network Socket**     | `validate:"host_port"`             | Enforces standard network endpoints (`host:port`). Natively checks **IPv6** syntax and port bounds (1-65535).              | `string`                                    |
+| **Enforced URL**       | `validate:"url"`                   | Checks Uniform Resource Identifiers. Strictly requires an explicit protocol scheme separator (e.g., `http://`, `grpc://`). | `string`                                    |
+
+---
+
+## Configuration Profiles (Valid & Invalid Cases)
 
 ### Example 1: Standard Application Config (Valid Profile)
 **YAML Specification (`config.yaml`):**
@@ -20,16 +39,8 @@ server:
     colors: true
     level: "warn"
 ```
-**Go Application Configuration Model Representation:**
+**Go Application Configuration Model:**
 ```go
-package main
-
-import (
-	"fmt"
-	"log"
-	"github.com/cybervask/yaml"
-)
-
 type Logging struct {
 	yaml.Includer `yaml:",inline"` // Activates !include support safely
 	Level         string           `yaml:"level" default:"info" validate:"choice=debug,info,warn"`
@@ -87,7 +98,6 @@ api_host_port: "127.0.0.1:85000" # Error: Target socket port parameter exceeds l
 ```text
 field APIUrl: value "cybervask.net:443" is missing a URL scheme separator (e.g., scheme://host)
 ```
-*(Note: If the `api_url` parameter is fixed, the engine moves down the queue to evaluate the port boundary error: `field APIHostPort: value "127.0.0.1:85000" contains an invalid port number`)*
 
 ---
 
@@ -102,3 +112,4 @@ type DefectiveConfig struct {
 ```text
 field Token is invalid: 'default' and 'not_empty' are mutually exclusive
 ```
+
