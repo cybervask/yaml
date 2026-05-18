@@ -84,6 +84,11 @@ func setDefaultsValue(v reflect.Value) error {
 					if err == nil {
 						fieldVal.SetInt(n)
 					}
+				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+					n, err := strconv.ParseUint(defaultValStr, 10, 64)
+					if err == nil {
+						fieldVal.SetUint(n)
+					}
 				}
 			}
 		}
@@ -245,8 +250,13 @@ func validateValue(v reflect.Value, fieldNamePrefix string) error {
 			if _, hasNotEmpty := rules["not_empty"]; hasNotEmpty && fieldVal.IsZero() {
 				return fmt.Errorf("field %s: is empty, but required by 'not_empty'", currentPath)
 			}
+
+			kind := fieldVal.Kind()
 			if fieldVal.IsZero() {
-				continue
+				// Строки, слайсы, мапы, указатели при IsZero() можно пропускать, если нет not_empty
+				if kind == reflect.String || kind == reflect.Slice || kind == reflect.Map || kind == reflect.Ptr {
+					continue
+				}
 			}
 
 			if choiceStr, hasChoice := rules["choice"]; hasChoice && fieldVal.Kind() == reflect.String {
