@@ -1,4 +1,4 @@
-# Smart Go-YAML Engine 🚀 [![Go CI/CD Pipeline](https://github.com)](https://github.com)
+# Smart Go-YAML Engine [![Go CI/CD Pipeline](https://github.com/cybervask/yaml/badges/main/pipeline.svg)](https://github.com/cybervask/yaml/-/pipelines)
 
 其他语言: [English (EN)](README.md) | [Русский (RU)](README.ru.md)
 
@@ -27,7 +27,7 @@ package main
 import (
 	"fmt"
 	"log"
-	"://github.com"
+	"github.com/cybervask/yaml"
 )
 
 type Logging struct {
