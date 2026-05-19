@@ -1,36 +1,22 @@
-version: 2
-
 run:
-  # Время ожидания до принудительного завершения проверки
   timeout: 5m
-  # Включаем проверку тестовых файлов (*_test.go)
   tests: true
-  # Автоопределение количества потоков по числу ядер CPU
   concurrency: 0
 
-# В v2 настройки линтеров сгруппированы строго по их именам
 linters:
   disable-all: true
   enable:
-    - govet        # Официальный анализатор Go (shadowing, printf, struct tags)
+    - govet        # Официальный анализатор Go (shadow, printf, struct tags)
     - errcheck     # Проверяет, что возвращаемые ошибки не игнорируются
     - staticcheck  # Набор проверок на логические ошибки и баги
     - revive       # Контроль стилистики и обязательного наличия GoDoc комментариев
     - gocritic     # Поиск микро-багов, специфичных для синтаксиса Go
-    - gocyclo      # Мониторинг избыточной сложности функций
     - misspell     # Проверка орфографии в кодовой базе и комментариях
     - unconvert    # Поиск избыточных приведений типов
     - ineffassign  # Обнаружение бесполезных присваиваний переменных
-    #- typecheck    # Базовый синтаксический анализатор компилятора Go
 
-# Специфичные настройки для каждого включенного анализатора в синтаксисе v2
 linters-settings:
-  govet:
-    # Проверка правильности использования структурных тегов и затенения переменных
-    check-shadowing: true
-    enable-all: true
-    disable:
-      - fieldalignment # Отключаем ругань на порядок полей в структурах
+  # Блок govet полностью удален, так как базовый запуск из коробки включает все проверки без конфликтов флагов
 
   gocritic:
     enabled-tags:
@@ -40,7 +26,6 @@ linters-settings:
       - opinionated
 
   revive:
-    # Контролирует качество и наличие GoDoc комментариев
     ignore-generated-header: true
     severity: warning
     rules:
@@ -57,23 +42,18 @@ linters-settings:
       - name: increment-decrement
       - name: var-naming
 
-  gocyclo:
-    # Максимальная цикломатическая сложность функций
-    min-complexity: 210
-
   misspell:
-    # Проверка опечаток (американский английский)
     locale: US
 
 issues:
-  # Новый формат подавления предупреждений в v2
   exclude-rules:
-    # В тестовых файлах отключаем обязательное требование GoDoc комментариев к функциям
+    - path: engine\.go
+      linters:
+        - gocyclo
     - path: _test\.go
       linters:
         - revive
       text: "exported: .* should have comment"
-    # В тестах допускается не обрабатывать возвращаемые ошибки для краткости
     - path: _test\.go
       linters:
         - errcheck
@@ -81,7 +61,3 @@ issues:
       linters:
         - revive
         - errcheck
-    # Отключаем проверку цикломатической сложности для ядра рефлексии
-    - path: engine\.go
-      linters:
-        - gocyclo

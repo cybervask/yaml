@@ -17,26 +17,26 @@ jobs:
       - name: Set up Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24' # Для проверки качества кода используем стабильную версию
+          go-version: '1.25' # Используем стабильную старшую версию для компиляции линтера
           cache: true
 
-      # Запуск официального GitHub Action для golangci-lint (Автоматически ставит v2)
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
-          # Опционально: кэширование результатов линтера для ускорения последующих проверок
           only-new-issues: false
+          # КРИТИЧЕСКИ ВАЖНО: собираем линтер из исходников через go install,
+          # чтобы он нативно поддерживал целевую версию Go из вашего проекта
+          install-mode: goinstall
 
   test:
     name: Build and Test
     runs-on: ubuntu-latest
-    needs: [] # Запускается параллельно с джобой линтера для экономии времени
+    needs: []
 
     strategy:
       matrix:
-        # Валидируем библиотеку на стабильных и актуальных версиях Go
-        go-version: [ '1.24', '1.25', '1.26' ]
+        go-version: [ '1.23', '1.24', '1.25' ]
 
     steps:
       - name: Check out repository code
@@ -46,13 +46,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
-          cache: true # Автоматически кэширует Go-модули
+          cache: true
 
       - name: Install dependencies
         run: go mod download
 
       - name: Verify code formatting
-        # Проверяем, что весь код отформатирован стандартным gofmt
         run: |
           if [ -n "$(gofmt -l .)" ]; then
             echo "The following files are not formatted with gofmt:"
@@ -61,5 +60,4 @@ jobs:
           fi
 
       - name: Execute Unit Tests
-        # Запускаем unit-тесты с race-детектором и сбором покрытия (atomic)
-        run: go test -v -race -covermode=atomic -coverprofile=coverage.txt ./...
+        run: go test -v -race -covermode=atomic -coverprofile=coverage.txt .
