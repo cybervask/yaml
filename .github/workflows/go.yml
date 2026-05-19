@@ -7,14 +7,36 @@ on:
     branches: [ main, master ]
 
 jobs:
+  lint:
+    name: Code Quality (Linter)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24' # Для проверки качества кода используем стабильную версию
+          cache: true
+
+      # Запуск официального GitHub Action для golangci-lint (Автоматически ставит v2)
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          # Опционально: кэширование результатов линтера для ускорения последующих проверок
+          only-new-issues: false
+
   test:
     name: Build and Test
     runs-on: ubuntu-latest
+    needs: [] # Запускается параллельно с джобой линтера для экономии времени
 
     strategy:
       matrix:
-        # Validate the library against current stable, patch, and cutting-edge Go editions
-        go-version: [ '1.23', '1.24', '1.25', '1.26' ]
+        # Валидируем библиотеку на стабильных и актуальных версиях Go
+        go-version: [ '1.24', '1.25', '1.26' ]
 
     steps:
       - name: Check out repository code
@@ -24,14 +46,13 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
-          cache: true # Automatically caches Go modules to accelerate subsequent builds
+          cache: true # Автоматически кэширует Go-модули
 
       - name: Install dependencies
         run: go mod download
 
       - name: Verify code formatting
-        # Assures all repository codebase files match official gofmt formatting styles.
-        # If unformatted files exist, the pipeline execution sequence fails immediately.
+        # Проверяем, что весь код отформатирован стандартным gofmt
         run: |
           if [ -n "$(gofmt -l .)" ]; then
             echo "The following files are not formatted with gofmt:"
@@ -40,6 +61,5 @@ jobs:
           fi
 
       - name: Execute Unit Tests
-        # Triggers testing packages with active -race flags to eliminate thread race conditions
-        # combined with verbose logging outputs and atomic coverage tracking metrics
-        run: go test -v -race -covermode=atomic -coverprofile=coverage.txt ./
+        # Запускаем unit-тесты с race-детектором и сбором покрытия (atomic)
+        run: go test -v -race -covermode=atomic -coverprofile=coverage.txt ./...

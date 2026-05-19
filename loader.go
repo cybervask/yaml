@@ -34,7 +34,8 @@ func Load(in []byte, out any, opts ...Option) error {
 		return fmt.Errorf("failed to decode YAML AST into target structure: %w", err)
 	}
 
-	return nil
+	return Validate(out)
+	// return nil
 }
 
 // Unmarshal decodes a slice of YAML-encoded bytes into the target destination.

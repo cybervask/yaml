@@ -23,7 +23,7 @@ func HelpStr(v any) string {
 	if t == nil {
 		return ""
 	}
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t.Kind() != reflect.Struct {
@@ -45,7 +45,7 @@ func HelpStr(v any) string {
 	// Define recursive structural crawl lambda closure
 	var walk func(reflect.Type, int, string)
 	walk = func(currentType reflect.Type, indent int, prefix string) {
-		if currentType.Kind() == reflect.Ptr {
+		if currentType.Kind() == reflect.Pointer {
 			currentType = currentType.Elem()
 		}
 		if currentType.Kind() != reflect.Struct {
@@ -98,7 +98,7 @@ func HelpStr(v any) string {
 
 			// Evaluate inner properties depth cascades
 			fieldType := field.Type
-			if fieldType.Kind() == reflect.Ptr {
+			if fieldType.Kind() == reflect.Pointer {
 				fieldType = fieldType.Elem()
 			}
 			if fieldType.Kind() == reflect.Struct {
@@ -112,7 +112,7 @@ func HelpStr(v any) string {
 	// Format layout output strings aligning lines cleanly by the longest property key span width bounds
 	formatStr := fmt.Sprintf("%%-%ds %%s %%s\n", maxPathLen+2)
 	for _, item := range items {
-		sb.WriteString(fmt.Sprintf(formatStr, item.yamlPath, item.desc, item.meta))
+		fmt.Fprintf(&sb, formatStr, item.yamlPath, item.desc, item.meta)
 	}
 
 	return sb.String()

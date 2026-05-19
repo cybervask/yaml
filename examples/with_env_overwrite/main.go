@@ -1,3 +1,4 @@
+// Package main provides example
 package main
 
 import (
@@ -40,7 +41,7 @@ server:
 `)
 
 	// global env override client and server tls min_version both!
-	os.Setenv("TLS_MIN_VERSION", "tls1.2")
+	_ = os.Setenv("TLS_MIN_VERSION", "tls1.2")
 
 	err := yaml.Load(data, &cfg)
 	if err != nil {
