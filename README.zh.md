@@ -57,7 +57,6 @@ type TLS struct {
 }
 
 type Logging struct {
-	yaml.Includer `yaml:",inline"` // 安全地激活 !include 标签分析器支持
 	Level         string           `yaml:"level" default:"info" validate:"choice=debug,info,warn"`
 	Colors        bool             `yaml:"colors"`
 	Timeout       string           `yaml:"timeout" default:"5s"`

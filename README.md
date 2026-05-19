@@ -57,7 +57,6 @@ type TLS struct {
 }
 
 type Logging struct {
-	yaml.Includer `yaml:",inline"` // Activates !include support safely
 	Level         string           `yaml:"level" default:"info" validate:"choice=debug,info,warn"`
 	Colors        bool             `yaml:"colors"`
 	Timeout       string           `yaml:"timeout" default:"5s"`
