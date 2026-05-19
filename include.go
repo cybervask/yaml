@@ -87,7 +87,7 @@ func resolveIncludes(node *yaml4.Node, currentDir string) error {
 
 // extractIncludes scans the AST mapping nodes to locate fields annotated with the include keyword,
 // writes their values to individual configuration files, and drops an `!include` reference in the parent tree.
-func extractIncludes(node *yaml4.Node, currentStruct interface{}, baseDir string) error {
+func extractIncludes(node *yaml4.Node, currentStruct any, baseDir string) error {
 	if node.Kind != yaml4.MappingNode {
 		for _, child := range node.Content {
 			if err := extractIncludes(child, currentStruct, baseDir); err != nil {
@@ -120,11 +120,11 @@ func extractIncludes(node *yaml4.Node, currentStruct interface{}, baseDir string
 				return fmt.Errorf("failed to marshal include node %s: %w", yamlKey, err)
 			}
 
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 				return fmt.Errorf("failed to create directory for %s: %w", fullPath, err)
 			}
 
-			if err := os.WriteFile(fullPath, subData, 0644); err != nil {
+			if err := os.WriteFile(fullPath, subData, 0o644); err != nil {
 				return fmt.Errorf("failed to write included file %s: %w", fullPath, err)
 			}
 
@@ -146,7 +146,7 @@ func extractIncludes(node *yaml4.Node, currentStruct interface{}, baseDir string
 }
 
 // parseIncludeTag parses struct tags via reflection to determine if a specific key requires file extraction.
-func parseIncludeTag(s interface{}, yamlKey string) (bool, string) {
+func parseIncludeTag(s any, yamlKey string) (ok bool, path string) {
 	v := reflect.Indirect(reflect.ValueOf(s))
 	if v.Kind() != reflect.Struct {
 		return false, ""

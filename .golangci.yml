@@ -1,8 +1,12 @@
 run:
+  # Время ожидания до принудительного завершения проверки
   timeout: 5m
+  # Включаем проверку тестовых файлов (*_test.go)
   tests: true
+  # Автоопределение количества параллельных потоков по числу ядер CPU
   concurrency: 0
 
+# Список активированных анализаторов для версии v1.x
 linters:
   disable-all: true
   enable:
@@ -15,8 +19,11 @@ linters:
     - unconvert    # Поиск избыточных приведений типов
     - ineffassign  # Обнаружение бесполезных присваиваний переменных
 
+# Специфичные настройки для включенных линтеров в формате v1.x
 linters-settings:
-  # Блок govet полностью удален, так как базовый запуск из коробки включает все проверки без конфликтов флагов
+  # Блок govet оставлен пустым, так как все базовые проверки (включая shadow)
+  # в v1.64.x уже активированы по умолчанию на уровне ядра линтера.
+  govet: {}
 
   gocritic:
     enabled-tags:
@@ -26,6 +33,7 @@ linters-settings:
       - opinionated
 
   revive:
+    # Контролирует качество и наличие GoDoc комментариев
     ignore-generated-header: true
     severity: warning
     rules:
@@ -43,20 +51,26 @@ linters-settings:
       - name: var-naming
 
   misspell:
+    # Проверка опечаток (американский английский)
     locale: US
 
 issues:
+  # Набор правил для подавления специфичных ворнингов
   exclude-rules:
+    # Отключаем проверку сложности gocyclo для ядра рефлексии
     - path: engine\.go
       linters:
         - gocyclo
+    # В тестовых файлах отключаем обязательное требование GoDoc комментариев к функциям
     - path: _test\.go
       linters:
         - revive
       text: "exported: .* should have comment"
+    # В тестах допускается не обрабатывать возвращаемые ошибки для краткости
     - path: _test\.go
       linters:
         - errcheck
+    # Отключаем строгие требования к документации для демонстрационных примеров
     - path: examples/.*
       linters:
         - revive

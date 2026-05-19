@@ -34,7 +34,8 @@ func SetDefaults(ptr interface{}) error {
 }
 
 // setDefaultsValue performs the underlying recursive assignment of defaults and environment overrides.
-// nolint:gocyclo
+//
+//nolint:gocyclo // Reason: heavy reflection type-switch matrix structure requires high complexity.
 func setDefaultsValue(v reflect.Value) error {
 	switch v.Kind() {
 	case reflect.Struct:
@@ -291,7 +292,8 @@ func Validate(ptr interface{}) error {
 }
 
 // validateValue performs automated constraint checks down the configuration node hierarchy tree.
-// nolint:gocyclo
+//
+//nolint:gocyclo // Reason: massive tag boundaries processing engine requires extensive conditional logical blocks.
 func validateValue(v reflect.Value, currentPath string, rules map[string]string, root reflect.Value, errs *[]error) {
 	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {

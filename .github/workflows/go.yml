@@ -17,16 +17,16 @@ jobs:
       - name: Set up Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25' # Используем стабильную старшую версию для компиляции линтера
+          go-version: '1.25' # Используем старшую доступную версию для сборки линтера
           cache: true
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.64.8
           only-new-issues: false
-          # КРИТИЧЕСКИ ВАЖНО: собираем линтер из исходников через go install,
-          # чтобы он нативно поддерживал целевую версию Go из вашего проекта
+          # КРИТИЧЕСКИ ВАЖНО: компилируем линтер из исходников,
+          # чтобы подружить его с версией 1.26 в вашем go.mod
           install-mode: goinstall
 
   test:

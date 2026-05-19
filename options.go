@@ -125,7 +125,7 @@ type (
 	//
 	// Deprecated: Migrate to the modernized [LoadErrors] API model.
 	//
-	//nolint:staticcheck
+	//nolint:staticcheck // Reason: preserving legacy struct for backward compatibility layouts API contracts.
 	TypeError yaml4.TypeError
 )
 
