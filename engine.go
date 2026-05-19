@@ -15,10 +15,14 @@ import (
 // durationType caches the reflect.Type of time.Duration for efficient type matching.
 var durationType = reflect.TypeOf(time.Duration(0))
 
-// SetDefaults recursively walks through the struct fields via a pointer and fills
-// uninitialized zero-value fields with the data defined in the `default` struct tag.
-// It also evaluates system environment variables via the `env` tag, which take absolute priority.
-// Returns an error if there is a design conflict where both 'default' and 'not_empty' are present on the same field.
+// SetDefaults recursively walks through the exported fields of a structure pointer
+// and populates uninitialized zero-value fields with the data defined in their `default` tags.
+//
+// System environment variables configured via the `env` tag are evaluated during
+// execution and take absolute precedence over standard tag defaults.
+//
+// It returns an error if a design conflict is detected where both 'default' and
+// 'not_empty' validate constraints are declared on the same structure field.
 func SetDefaults(ptr interface{}) error {
 	v := reflect.ValueOf(ptr)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
@@ -39,17 +43,12 @@ func setDefaultsValue(v reflect.Value) error {
 			validateTag, hasValidate := fieldType.Tag.Lookup("validate")
 			defaultValStr, hasDefault := fieldType.Tag.Lookup("default")
 
-			// Validation of architectural design conflict during tag planning
+			// Validate architectural design integrity during tag compilation
 			if hasDefault && hasValidate && strings.Contains(validateTag, "not_empty") {
 				return fmt.Errorf("field %s is invalid: 'default' and 'not_empty' are mutually exclusive", fieldType.Name)
 			}
 
-			// Smart bypass for inner library marker structure
-			if fieldType.Anonymous && fieldType.Type == reflect.TypeOf(Includer{}) {
-				continue
-			}
-
-			// Legacy generic Value property evaluation fallback support
+			// Safe fallback loop step for legacy internal property wrappers
 			if fieldType.Name == "Value" {
 				if err := setDefaultsValue(fieldVal); err != nil {
 					return err
@@ -57,7 +56,7 @@ func setDefaultsValue(v reflect.Value) error {
 				continue
 			}
 
-			// Smart allocation and parsing for uninitialized slices (e.g. default:"h2,http/1.1")
+			// Safely instantiate and populate uninitialized slices (e.g. default:"h2,http/1.1")
 			if fieldVal.Kind() == reflect.Slice {
 				if hasDefault && fieldVal.IsZero() {
 					if fieldVal.Type().Elem().Kind() == reflect.String {
@@ -75,7 +74,7 @@ func setDefaultsValue(v reflect.Value) error {
 				continue
 			}
 
-			// Deep recursive processing step for downstream inner structs and maps
+			// Deep recursive processing step for downstream nested structures and maps
 			if fieldVal.Kind() == reflect.Struct || fieldVal.Kind() == reflect.Map {
 				if err := setDefaultsValue(fieldVal); err != nil {
 					return err
@@ -83,9 +82,7 @@ func setDefaultsValue(v reflect.Value) error {
 				continue
 			}
 
-			// Processing env and default tags for primitive fields types
 			envVarName := fieldType.Tag.Get("env")
-
 			var targetValStr string
 			var hasValueToSet bool
 
@@ -97,18 +94,18 @@ func setDefaultsValue(v reflect.Value) error {
 				}
 			}
 
-			// Priority 2: Fallback to tag default configuration definition literal string
+			// Priority 2: Fallback to static tag configuration defaults
 			if !hasValueToSet && hasDefault {
 				targetValStr = defaultValStr
 				hasValueToSet = true
 			}
 
 			// Determine if a live environment variable requires an explicit override layer
-			// over an already unmarshaled parameter value block
+			// over an already parsed struct configuration value
 			isEnvOverride := envVarName != "" && os.Getenv(envVarName) != ""
 
 			if hasValueToSet && (fieldVal.IsZero() || isEnvOverride) {
-				// Special duration parsing string adapter wrapper
+				// Parse specialized duration configuration syntax
 				if fieldVal.Type() == durationType {
 					d, err := time.ParseDuration(targetValStr)
 					if err != nil {
@@ -186,7 +183,7 @@ func setDefaultsValue(v reflect.Value) error {
 }
 
 // parseValidateTag tokenizes the validation tag string into separate rule mappings.
-// It keeps internal values isolated even if they contain punctuation like commas (e.g. inside regex patterns).
+// It isolates parameters even if they contain punctuation like commas (e.g. inside regex patterns).
 func parseValidateTag(tag string) map[string]string {
 	rules := make(map[string]string)
 	if tag == "" {
@@ -261,8 +258,14 @@ func parseValidateTag(tag string) map[string]string {
 	return rules
 }
 
-// Validate executes deep, recursive property sweeps across runtime models to check that assigned values
-// align perfectly with tag rule restrictions listed inside `validate` annotations (choice, min/max, regexp, host_port, url, not_empty).
+// Validate executes deep, recursive structural checks across the application configuration models.
+// It enforces tag constraints listed inside `validate` annotations, including:
+//   - choice (validation against comma-separated white/blacklists)
+//   - min / max (range verification for numeric kinds)
+//   - regexp (regular expression pattern matching validation)
+//   - host_port (verifies valid physical string network socket address structures)
+//   - url (verifies valid Absolute RFC-compliant URL patterns)
+//   - not_empty (guarantees properties cannot contain zero values)
 func Validate(ptr interface{}) error {
 	v := reflect.ValueOf(ptr)
 	if v.Kind() != reflect.Ptr || v.IsNil() {
@@ -271,7 +274,7 @@ func Validate(ptr interface{}) error {
 	return validateValue(v.Elem(), "", nil)
 }
 
-// validateValue performs the automated constraint checks down the configuration node hierarchy tree.
+// validateValue performs automated constraint checks down the configuration node hierarchy tree.
 func validateValue(v reflect.Value, currentPath string, rules map[string]string) error {
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
@@ -411,10 +414,6 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string)
 			nextPath := fieldType.Name
 			if currentPath != "" {
 				nextPath = currentPath + "." + fieldType.Name
-			}
-
-			if fieldType.Anonymous && fieldType.Type == reflect.TypeOf(Includer{}) {
-				continue
 			}
 
 			if fieldType.Name == "Value" {

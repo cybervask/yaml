@@ -6,37 +6,43 @@ import (
 	yaml4 "go.yaml.in/yaml/v4"
 )
 
-// Encoder provides a classic streaming serializing platform maintained for backwards compatibility.
+// Encoder wraps an underlying YAML stream encoder to serialize data entities
+// directly to an output stream.
 type Encoder struct {
 	enc *yaml4.Encoder
 }
 
-// NewEncoder builds a classic stream processing Encoder mechanism.
+// NewEncoder returns a new [Encoder] that writes to the provided [io.Writer].
 func NewEncoder(w io.Writer) *Encoder {
 	return &Encoder{enc: yaml4.NewEncoder(w)}
 }
 
-// Encode converts and directs data entities directly out onto the established transport writer.
+// Encode serializes the value pointed to by v into its YAML representation
+// and writes it to the underlying output stream.
 func (enc *Encoder) Encode(v any) error {
 	return enc.enc.Encode(v)
 }
 
-// SetIndent changes the indentation sizing layout manually (accepts bounding spans 2-9).
+// SetIndent configures the indentation spacing layout for the encoder.
+// It typically accepts values ranging from 2 to 9 spaces.
 func (enc *Encoder) SetIndent(spaces int) {
 	enc.enc.SetIndent(spaces)
 }
 
-// CompactSeqIndent makes it so that '- ' is considered part of the indentation.
+// CompactSeqIndent configures the encoder to treat the sequence block indicator
+// ('- ') as part of the indentation block.
 func (enc *Encoder) CompactSeqIndent() {
 	enc.enc.CompactSeqIndent()
 }
 
-// DefaultSeqIndent makes it so that '- ' is not considered part of the indentation.
+// DefaultSeqIndent configures the encoder to exclude the sequence block indicator
+// ('- ') from the indentation block calculations.
 func (enc *Encoder) DefaultSeqIndent() {
 	enc.enc.DefaultSeqIndent()
 }
 
-// Close gracefully tears down the data output encoders.
+// Close flushes any remaining buffered document data to the target stream
+// and gracefully terminates the underlying encoder instance.
 func (enc *Encoder) Close() error {
 	return enc.enc.Close()
 }

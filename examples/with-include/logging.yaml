@@ -1,0 +1,4 @@
+level: trace
+colors: true
+caller: true
+stack: true

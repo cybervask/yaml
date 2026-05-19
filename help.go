@@ -7,13 +7,17 @@ import (
 	"strings"
 )
 
-// Help prints the beautifully formatted configuration layout documentation directly to os.Stderr.
+// Help writes a beautifully formatted representation of the configuration layout
+// schema directly to [os.Stderr].
 func Help(v any) {
 	fmt.Fprint(os.Stderr, HelpStr(v))
 }
 
-// HelpStr recursively analyzes the configuration structure via reflection and generates
-// an aligned human-readable documentation string containing fields, descriptions, env overrides, defaults, and validation rules.
+// HelpStr recursively analyzes the provided configuration structure via reflection
+// and generates an aligned, human-readable documentation string.
+//
+// The output contains the structural hierarchy of fields, descriptive documentation,
+// environment variable overrides, defaults, and associated validation constraint rules.
 func HelpStr(v any) string {
 	t := reflect.TypeOf(v)
 	if t == nil {
@@ -32,7 +36,7 @@ func HelpStr(v any) string {
 	type helpItem struct {
 		yamlPath string
 		desc     string
-		meta     string // For storing aggregated env, default, and validate rule annotations
+		meta     string // Stores aggregated env, default, and validate rule annotations
 	}
 
 	var items []helpItem
@@ -51,22 +55,17 @@ func HelpStr(v any) string {
 		for i := 0; i < currentType.NumField(); i++ {
 			field := currentType.Field(i)
 
-			// Bypass internal split-configuration tracking markers safely
-			if field.Anonymous && field.Type == reflect.TypeOf(Includer{}) {
-				continue
-			}
-
-			// Get yaml key name or fallback to lowercase field name
+			// Extract the YAML key name or fall back to the lowercase field name
 			yamlName := field.Tag.Get("yaml")
 			if yamlName == "" {
 				yamlName = strings.ToLower(field.Name)
 			} else {
-				// Correctly extract the first element as the actual key name
+				// Extract the first element as the actual key name
 				yamlParts := strings.Split(yamlName, ",")
 				yamlName = yamlParts[0]
 			}
 
-			// Generate balanced hierarchical spaces spacing indentation tracks (e.g. "  tls:")
+			// Generate structural spacing indentation tracking lines (e.g. "  tls:")
 			displayPath := strings.Repeat("  ", indent) + yamlName + ":"
 			if len(displayPath) > maxPathLen {
 				maxPathLen = len(displayPath)

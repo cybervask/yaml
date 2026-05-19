@@ -13,16 +13,18 @@ type TestSubConfig struct {
 }
 
 type TestConfig struct {
-	Env          string                 `yaml:"env" default:"dev" validate:"choice=dev,stage,prod"`
-	Color        string                 `yaml:"color" default:"white" validate:"choice=!red,!black"`
-	BindAddr     string                 `yaml:"bind_addr" validate:"host_port"`
-	WebURL       string                 `yaml:"web_url" validate:"url"`
-	Code         string                 `yaml:"code" validate:"regexp=^[a-z]{2,4}$"`
-	Workers      uint                   `yaml:"workers" default:"10" validate:"min=1,max=100"`
-	RequiredItem string                 `yaml:"req" validate:"not_empty"`
-	Logging      Include[TestSubConfig] `yaml:"logging"`
+	Env          string        `yaml:"env" default:"dev" validate:"choice=dev,stage,prod"`
+	Color        string        `yaml:"color" default:"white" validate:"choice=!red,!black"`
+	BindAddr     string        `yaml:"bind_addr" validate:"host_port"`
+	WebURL       string        `yaml:"web_url" validate:"url"`
+	Code         string        `yaml:"code" validate:"regexp=^[a-z]{2,4}$"`
+	Workers      uint          `yaml:"workers" default:"10" validate:"min=1,max=100"`
+	RequiredItem string        `yaml:"req" validate:"not_empty"`
+	Logging      TestSubConfig `yaml:"logging"`
 }
 
+// TestSetDefaultsAndValidate_Success verifies that default configuration fields
+// are correctly applied and that valid configurations pass the validation step.
 func TestSetDefaultsAndValidate_Success(t *testing.T) {
 	cfg := TestConfig{
 		BindAddr:     "127.0.0.1:8080",
@@ -31,12 +33,12 @@ func TestSetDefaultsAndValidate_Success(t *testing.T) {
 		RequiredItem: "present",
 	}
 
-	// 1. Применяем дефолты
+	// 1. Apply structure defaults
 	if err := SetDefaults(&cfg); err != nil {
 		t.Fatalf("unexpected error in SetDefaults: %v", err)
 	}
 
-	// Проверяем заполнение дефолтов
+	// Verify default values populate correctly
 	if cfg.Env != "dev" {
 		t.Errorf("expected Env to be 'dev', got %q", cfg.Env)
 	}
@@ -49,16 +51,18 @@ func TestSetDefaultsAndValidate_Success(t *testing.T) {
 		t.Errorf("expected Workers to be 10, got %d", cfg.Workers)
 	}
 
-	if cfg.Logging.Value.Level != "info" {
-		t.Errorf("expected Logging.Level to be 'info', got %q", cfg.Logging.Value.Level)
+	if cfg.Logging.Level != "info" {
+		t.Errorf("expected Logging.Level to be 'info', got %q", cfg.Logging.Level)
 	}
 
-	// 2. Запускаем валидацию
+	// 2. Execute structure validation checks
 	if err := Validate(&cfg); err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
 	}
 }
 
+// TestValidate_Errors evaluates various configuration edge cases that should
+// trigger validation constraint violations.
 func TestValidate_Errors(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -96,7 +100,7 @@ func TestValidate_Errors(t *testing.T) {
 		{
 			name: "host_port violation",
 			modify: func(c *TestConfig) {
-				c.BindAddr = "google.com" // без порта
+				c.BindAddr = "google.com" // Missing port specification
 			},
 			errSubstr: "is not a valid host:port format",
 		},
@@ -138,6 +142,8 @@ func TestValidate_Errors(t *testing.T) {
 	}
 }
 
+// TestMutualExclusiveTags validates that structural declarations containing both
+// `default` and `not_empty` constraints trigger an error during execution.
 func TestMutualExclusiveTags(t *testing.T) {
 	type BadConfig struct {
 		Value string `yaml:"val" default:"secret" validate:"not_empty"`
@@ -153,13 +159,15 @@ func TestMutualExclusiveTags(t *testing.T) {
 	}
 }
 
+// TestValidate_SliceElements verifies that structural validations are recursively
+// applied over sequence structures (slices) for both integers and strings.
 func TestValidate_SliceElements(t *testing.T) {
 	type SliceConfig struct {
 		AllowedTags []string `yaml:"tags" validate:"choice=golang,docker,k8s"`
 		Ports       []uint   `yaml:"ports" validate:"min=80,max=443"`
 	}
 
-	// Валидный кейс
+	// Valid validation use case
 	cfg := SliceConfig{
 		AllowedTags: []string{"golang", "k8s"},
 		Ports:       []uint{80, 443},
@@ -168,9 +176,9 @@ func TestValidate_SliceElements(t *testing.T) {
 		t.Fatalf("expected slice config to be valid, got err: %v", err)
 	}
 
-	// Невалидный кейс: choice нарушен в слайсе
+	// Invalid use case: 'choice' violation inside string sequence
 	badCfg := SliceConfig{
-		AllowedTags: []string{"golang", "java"}, // java нет в списке choice
+		AllowedTags: []string{"golang", "java"}, // "java" is missing from the choice list
 		Ports:       []uint{80},
 	}
 	err := Validate(&badCfg)
@@ -181,10 +189,10 @@ func TestValidate_SliceElements(t *testing.T) {
 		t.Errorf("unexpected error text: %v", err)
 	}
 
-	// Невалидный кейс: min нарушен в слайсе чисел
+	// Invalid use case: 'min' boundary range violation inside numeric sequence
 	badPortsCfg := SliceConfig{
 		AllowedTags: []string{"golang"},
-		Ports:       []uint{22}, // 22 меньше min=80
+		Ports:       []uint{22}, // 22 is below min=80 constraint
 	}
 	err = Validate(&badPortsCfg)
 	if err == nil {
@@ -195,6 +203,8 @@ func TestValidate_SliceElements(t *testing.T) {
 	}
 }
 
+// TestSetDefaults_InCollections simulates YAML unmarshalling states and checks if
+// unassigned nested collection fields are correctly initialized recursively.
 func TestSetDefaults_InCollections(t *testing.T) {
 	type ItemConfig struct {
 		Name  string `yaml:"name" default:"unknown"`
@@ -206,25 +216,24 @@ func TestSetDefaults_InCollections(t *testing.T) {
 		ItemsMap  map[string]ItemConfig `yaml:"items_map"`
 	}
 
-	// Имитируем то, что делает парсер YAML: создает элементы,
-	// но оставляет поля Name и Count пустыми (нулевыми)
+	// Simulate unmarshaled structure data where fields are left unassigned (zero-valued)
 	cfg := HolderConfig{
 		ItemsList: []ItemConfig{
-			{Name: "first"}, // Count пропущен (равен 0)
-			{},              // И Name, и Count пропущены
+			{Name: "first"}, // Count omitted (defaults to 0)
+			{},              // Name and Count both omitted
 		},
 		ItemsMap: map[string]ItemConfig{
-			"key1": {Name: "mapped"}, // Count пропущен
-			"key2": {},               // И Name, и Count пропущены
+			"key1": {Name: "mapped"}, // Count omitted
+			"key2": {},               // Name and Count both omitted
 		},
 	}
 
-	// Запускаем наш обновленный движок дефолтов
+	// Trigger underlying collection properties fallback processing
 	if err := SetDefaults(&cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Проверяем элементы в СЛАЙСЕ
+	// Verify slice element structural mutations
 	if cfg.ItemsList[0].Count != 5 {
 		t.Errorf("expected ItemsList[0].Count to be 5, got %d", cfg.ItemsList[0].Count)
 	}
@@ -232,7 +241,7 @@ func TestSetDefaults_InCollections(t *testing.T) {
 		t.Errorf("expected ItemsList[1] defaults to be set, got Name=%q, Count=%d", cfg.ItemsList[1].Name, cfg.ItemsList[1].Count)
 	}
 
-	// Проверяем элементы в МАПЕ
+	// Verify map element structural mutations
 	if cfg.ItemsMap["key1"].Count != 5 {
 		t.Errorf("expected ItemsMap['key1'].Count to be 5, got %d", cfg.ItemsMap["key1"].Count)
 	}
@@ -241,6 +250,8 @@ func TestSetDefaults_InCollections(t *testing.T) {
 	}
 }
 
+// TestSetDefaults_SliceString verifies that string slices are initialized
+// correctly when declared with comma-separated tag literals.
 func TestSetDefaults_SliceString(t *testing.T) {
 	type TLS struct {
 		Alpn []string `yaml:"alpn" default:"h2,http/1.1" validate:"choice=h2,http/1.1"`
@@ -250,13 +261,13 @@ func TestSetDefaults_SliceString(t *testing.T) {
 		Crypto TLS `yaml:"crypto"`
 	}
 
-	cfg := AppConfig{} // Alpn изначально nil
+	cfg := AppConfig{} // Alpn begins as a nil initialization slice
 
 	if err := SetDefaults(&cfg); err != nil {
 		t.Fatalf("unexpected error in SetDefaults: %v", err)
 	}
 
-	// Проверяем, что слайс создался и заполнился элементами
+	// Verify slice generation logic split elements properly
 	if len(cfg.Crypto.Alpn) != 2 {
 		t.Fatalf("expected Alpn slice to have 2 elements, got %d", len(cfg.Crypto.Alpn))
 	}
@@ -265,12 +276,15 @@ func TestSetDefaults_SliceString(t *testing.T) {
 		t.Errorf("unexpected slice elements: %v", cfg.Crypto.Alpn)
 	}
 
-	// Проверяем, что валидация также проходит успешно
+	// Verify structure validation operates cleanly over dynamically populated arrays
 	if err := Validate(&cfg); err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
 	}
 }
 
+// TestSetDefaults_EnvPrecedence verifies that active operating system environment
+// variables override configured structural default tags but do not clobber fields
+// explicitly unmarshaled from structural configurations.
 func TestSetDefaults_EnvPrecedence(t *testing.T) {
 	type EnvConfig struct {
 		Host string `yaml:"host" default:"localhost" env:"APP_HOST"`
@@ -278,22 +292,22 @@ func TestSetDefaults_EnvPrecedence(t *testing.T) {
 	}
 
 	os.Setenv("APP_HOST", "10.0.0.1")
-	defer os.Unsetenv("APP_HOST") // Очищаем за собой
+	defer os.Unsetenv("APP_HOST") // Ensure state is safely cleaned up post execution
 
 	cfg := EnvConfig{
-		Port: 9090, // Задано жестко на этапе парсинга (эмуляция YAML)
+		Port: 9090, // Value populated explicitly during early parsing simulation
 	}
 
 	if err := SetDefaults(&cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// 1. Host должен взяться из ENV, так как переменная задана в ОС
+	// 1. Host must bind to the value extracted from the environment variable context
 	if cfg.Host != "10.0.0.1" {
 		t.Errorf("expected Host to be '10.0.0.1' from env, got %q", cfg.Host)
 	}
 
-	// 2. Port должен остаться 9090, так как APP_PORT пустой, и значение из YAML в приоритете над дефолтом
+	// 2. Port must remain 9090 since configuration data takes absolute precedence over defaults
 	if cfg.Port != 9090 {
 		t.Errorf("expected Port to remain 9090, got %d", cfg.Port)
 	}

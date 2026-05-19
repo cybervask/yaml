@@ -4,103 +4,107 @@ import (
 	yaml4 "go.yaml.in/yaml/v4"
 )
 
-// Version presets
+// Re-exported version configuration presets.
 var (
 	V2 = yaml4.V2
 	V3 = yaml4.V3
 	V4 = yaml4.V4
 )
 
-// Option allows configuring YAML loading and dumping operations.
+// Option defines a functional configuration capability that can customize
+// and control YAML loading and dumping pipeline operations.
 type Option = yaml4.Option
 
-// With-options
+// Re-exported functional configuration option parameters.
 var (
-	// WithIndent sets indentation spaces (2-9).
+	// WithIndent configures the preferred indentation spacing layout (bounds ranging from 2 to 9).
 	WithIndent = yaml4.WithIndent
 
-	// WithCompactSeqIndent configures '- ' as part of indentation.
+	// WithCompactSeqIndent configures the encoder to treat the sequence indicator ('- ')
+	// as part of the indentation alignment block.
 	WithCompactSeqIndent = yaml4.WithCompactSeqIndent
 
-	// WithKnownFields enables strict field checking during loading.
+	// WithKnownFields enforces strict matching between incoming YAML keys and
+	// exported structure fields during decoding.
 	WithKnownFields = yaml4.WithKnownFields
 
-	// WithSingleDocument only processes first document in stream.
+	// WithSingleDocument ensures that only the initial document inside an incoming stream is processed.
 	WithSingleDocument = yaml4.WithSingleDocument
 
-	// WithStreamNodes enables stream boundary nodes when loading.
+	// WithStreamNodes enables stream boundary node tracking parameters when decoding documents.
 	WithStreamNodes = yaml4.WithStreamNodes
 
-	// WithAllDocuments enables multi-document mode for Load and Dump.
+	// WithAllDocuments enables multi-document processing semantics for both [Load] and [Dump] operations.
 	WithAllDocuments = yaml4.WithAllDocuments
 
-	// WithLineWidth sets preferred line width for output.
+	// WithLineWidth defines the preferred maximum column width threshold for wrapped text layout formatting.
 	WithLineWidth = yaml4.WithLineWidth
 
-	// WithUnicode controls non-ASCII characters in output.
+	// WithUnicode allows or suppresses escaping routines over non-ASCII characters inside output streams.
 	WithUnicode = yaml4.WithUnicode
 
-	// WithUniqueKeys enables duplicate key detection.
+	// WithUniqueKeys activates strict checks to prevent duplicate keys within mapping elements.
 	WithUniqueKeys = yaml4.WithUniqueKeys
 
-	// WithCanonical forces canonical YAML output format.
+	// WithCanonical instructs the engine to enforce canonical YAML representation layouts on output streams.
 	WithCanonical = yaml4.WithCanonical
 
-	// WithLineBreak sets line ending style for output.
+	// WithLineBreak configures the specific platform-dependent line termination layout format.
 	WithLineBreak = yaml4.WithLineBreak
 
-	// WithExplicitStart controls document start markers (---).
+	// WithExplicitStart forces document boundary start markers (---) onto emitted documents.
 	WithExplicitStart = yaml4.WithExplicitStart
 
-	// WithExplicitEnd controls document end markers (...).
+	// WithExplicitEnd forces document boundary end markers (...) onto emitted documents.
 	WithExplicitEnd = yaml4.WithExplicitEnd
 
-	// WithFlowSimpleCollections controls flow style for simple collections.
+	// WithFlowSimpleCollections applies block or flow line styles selectively over basic collection types.
 	WithFlowSimpleCollections = yaml4.WithFlowSimpleCollections
 
-	// WithQuotePreference sets preferred quote style when quoting is required.
+	// WithQuotePreference configures preferred character escapes and quoting options when text quoting is required.
 	WithQuotePreference = yaml4.WithQuotePreference
 )
 
 var (
-	// OptsYAML evaluates a raw properties config segment string, extracting structural Option configurations.
+	// OptsYAML evaluates a raw configuration properties string block to parse and extract operational configuration options.
 	OptsYAML = yaml4.OptsYAML
 
-	// Options folds multiple distinct configuration parameter settings down into one unified single composite Option.
+	// Options aggregates multiple individual configuration parameters into a unified compound [Option].
 	Options = yaml4.Options
 )
 
-// Type and constant re-exports
-
 type (
-	// Node represents a YAML node in the document tree.
+	// Node models an abstract structural syntax element inside the overall YAML document parsing hierarchy tree.
 	Node = yaml4.Node
 
-	// Kind identifies the type of a YAML node.
+	// Kind identifies the structural type semantics associated with a specific document [Node].
 	Kind = yaml4.Kind
 
-	// Style controls the presentation of a YAML node.
+	// Style controls visual syntax representation and string formatting configurations on a output document [Node].
 	Style = yaml4.Style
 
-	// Marshaler is implemented by types with custom YAML marshaling.
+	// Marshaler defines the interface protocol implemented by data types that require customized YAML serialization behavior.
 	Marshaler = yaml4.Marshaler
 
-	// IsZeroer is implemented by types that can report if they're zero.
+	// IsZeroer defines the interface protocol implemented by types capable of reporting whether their inner state reflects a zero value.
 	IsZeroer = yaml4.IsZeroer
 )
 
+// Unmarshaler defines the interface protocol implemented by data types that require customized YAML deserialization capabilities.
 type Unmarshaler yaml4.Unmarshaler
 
-// Re-export stream-related types
-
 type (
+	// VersionDirective describes explicit version specifications contained inside structural document directives blocks.
 	VersionDirective yaml4.VersionDirective
-	TagDirective     yaml4.TagDirective
-	Encoding         yaml4.Encoding
+
+	// TagDirective maps shorthand macro configurations used within structural tag declarations inside document blocks.
+	TagDirective yaml4.TagDirective
+
+	// Encoding represents text streaming character layout types.
+	Encoding yaml4.Encoding
 )
 
-// Re-export encoding constants
-
+// Re-exported character data streaming stream encodings configuration constants.
 const (
 	EncodingAny     = yaml4.EncodingAny
 	EncodingUTF8    = yaml4.EncodingUTF8
@@ -108,29 +112,24 @@ const (
 	EncodingUTF16BE = yaml4.EncodingUTF16BE
 )
 
-// Re-export error types
-
 type (
-	// LoadError represents an error encountered while decoding a YAML document.
-	//
-	// It contains details about the location in the document where the error
-	// occurred, as well as a descriptive message.
+	// LoadError represents an execution failure encountered during document unpacking operations,
+	// containing file coordinates and detailed diagnostics about the incident location.
 	LoadError yaml4.LoadError
 
-	// LoadErrors is returned when one or more fields cannot be properly decoded.
-	//
-	// It contains multiple *[LoadError] instances with details about each error.
+	// LoadErrors represents a composite validation type capturing multiple field processing failures
+	// collected during complex multi-property decoding tasks.
 	LoadErrors yaml4.LoadErrors
 
-	// TypeError is an obsolete error type retained for compatibility.
+	// TypeError represents a legacy semantic decoding tracking model preserved exclusively for backwards compatibility.
 	//
-	// Deprecated: Use [LoadErrors] instead.
+	// Deprecated: Migrate to the modernized [LoadErrors] API model.
 	//
-	//nolint:staticcheck // we are using deprecated TypeError for compatibility
+	//nolint:staticcheck
 	TypeError yaml4.TypeError
 )
 
-// Re-export Kind constants
+// Re-exported node identification category tracking constant values.
 const (
 	DocumentNode = yaml4.DocumentNode
 	SequenceNode = yaml4.SequenceNode
@@ -140,7 +139,7 @@ const (
 	StreamNode   = yaml4.StreamNode
 )
 
-// Re-export Style constants
+// Re-exported document element stylistic structural visibility presentation constants.
 const (
 	TaggedStyle       = yaml4.TaggedStyle
 	DoubleQuotedStyle = yaml4.DoubleQuotedStyle
@@ -150,22 +149,22 @@ const (
 	FlowStyle         = yaml4.FlowStyle
 )
 
-// LineBreak represents the line ending style for YAML output.
+// LineBreak represents line feed configuration layout markers applied over output files.
 type LineBreak = yaml4.LineBreak
 
-// Line break constants for different platforms.
+// Re-exported environment line ending platform termination literal constants.
 const (
-	LineBreakLN   = yaml4.LineBreakLN   // Unix-style \n (default)
-	LineBreakCR   = yaml4.LineBreakCR   // Old Mac-style \r
-	LineBreakCRLN = yaml4.LineBreakCRLN // Windows-style \r\n
+	LineBreakLN   = yaml4.LineBreakLN   // Unix-style line feeding markers (\n)
+	LineBreakCR   = yaml4.LineBreakCR   // Classic legacy Macintosh line feed carriage markers (\r)
+	LineBreakCRLN = yaml4.LineBreakCRLN // Windows-style paired carriage line feeding parameters (\r\n)
 )
 
-// QuoteStyle represents the quote style to use when quoting is required.
+// QuoteStyle defines specific text wrapping quotes applied over raw data elements.
 type QuoteStyle = yaml4.QuoteStyle
 
-// Quote style constants for required quoting.
+// Re-exported string quotation styling presentation constants.
 const (
-	QuoteSingle = yaml4.QuoteSingle // Prefer single quotes (v4 default)
-	QuoteDouble = yaml4.QuoteDouble // Prefer double quotes
-	QuoteLegacy = yaml4.QuoteLegacy // Legacy v2/v3 behavior
+	QuoteSingle = yaml4.QuoteSingle // Prefer single quote escaping semantics (modern v4 baseline default)
+	QuoteDouble = yaml4.QuoteDouble // Prefer double quote escaping configurations
+	QuoteLegacy = yaml4.QuoteLegacy // Fallback to classic legacy v2/v3 escaping layouts
 )
