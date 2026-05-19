@@ -42,4 +42,4 @@ jobs:
       - name: Execute Unit Tests
         # Triggers testing packages with active -race flags to eliminate thread race conditions
         # combined with verbose logging outputs and atomic coverage tracking metrics
-        run: go test -v -race -covermode=atomic ./...
+        run: go test -v -race -covermode=atomic -coverprofile=coverage.txt ./
