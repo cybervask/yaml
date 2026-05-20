@@ -185,8 +185,8 @@ func TestValidate_SliceElements(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected validation error for invalid slice string element, got nil")
 	}
-	// ИСПРАВЛЕНО: проверяем корректное имя поля с индексом элемента слайса, как возвращает ядро
-	if !strings.Contains(err.Error(), "AllowedTags[1]: value \"java\" is invalid") {
+	// Verified to map correctly against lowercase tag path segments
+	if !strings.Contains(err.Error(), "tags[1]: value \"java\" is invalid") {
 		t.Errorf("unexpected error text: %v", err)
 	}
 
@@ -286,9 +286,7 @@ func TestSetDefaults_EnvPrecedence(t *testing.T) {
 	}
 
 	_ = os.Setenv("APP_HOST", "10.0.0.1")
-	defer func() {
-		_ = os.Unsetenv("APP_HOST")
-	}()
+	defer func() { _ = os.Unsetenv("APP_HOST") }()
 
 	cfg := EnvConfig{
 		Port: 9090,
@@ -405,7 +403,7 @@ func TestValidate_NewConstraints(t *testing.T) {
 func TestValidate_ExtendedFeatures(t *testing.T) {
 	// 1. Verify safe Unicode Rune Counting (multibyte characters).
 	type RuneConfig struct {
-		Word string `validate:"minlen=5,maxlen=5"`
+		Word string `yaml:"word" validate:"minlen=5,maxlen=5"`
 	}
 	rc := RuneConfig{Word: "Привет"} // 6 runes (12 bytes in UTF-8), should fail maxlen=5.
 	if err := Validate(&rc); err == nil || !strings.Contains(err.Error(), "exceeds maxlen") {
@@ -418,7 +416,7 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 
 	// 2. Verify numerical parsing bounds tailored for time.Duration metrics.
 	type DurationConfig struct {
-		Interval time.Duration `validate:"min=1s,max=10m"`
+		Interval time.Duration `yaml:"interval" validate:"min=1s,max=10m"`
 	}
 	dc := DurationConfig{Interval: 500 * time.Millisecond} // Below 1s lower limit.
 	if err := Validate(&dc); err == nil || !strings.Contains(err.Error(), "< min") {
@@ -431,10 +429,10 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 
 	// 3. Verify standard data formatting constraints (IP variants and unique IDs).
 	type FormatConfig struct {
-		AnyIP string `validate:"format=ip"`
-		V4    string `validate:"format=ipv4"`
-		V6    string `validate:"format=ipv6"`
-		ID    string `validate:"format=uuid"`
+		AnyIP string `yaml:"any_ip" validate:"format=ip"`
+		V4    string `yaml:"v4" validate:"format=ipv4"`
+		V6    string `yaml:"v6" validate:"format=ipv6"`
+		ID    string `yaml:"id" validate:"format=uuid"`
 	}
 	fc := FormatConfig{AnyIP: "1.2.3.4", V4: "127.0.0.1", V6: "::1", ID: "123e4567-e89b-12d3-a456-426614174000"}
 	if err := Validate(&fc); err != nil {
@@ -446,7 +444,7 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 		t.Errorf("expected strict IPv4 layout evaluation failure, got: %v", err)
 	}
 
-	// 4. Verify conditional cross-field checking constraints (required_if).
+	// 4. Verify conditional cross-field checking constraints (required_if) with negation formatting.
 	type RequiredIfConfig struct {
 		Mode        string `yaml:"mode"`
 		Token       string `yaml:"token" validate:"required_if=Mode:prod"`
@@ -455,19 +453,19 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 	}
 
 	ric := RequiredIfConfig{Mode: "prod", Token: ""} // Violates condition since Mode=prod requires Token.
-	if err := Validate(&ric); err == nil || !strings.Contains(err.Error(), "is required when field Mode is prod") {
+	if err := Validate(&ric); err == nil || !strings.Contains(err.Error(), "is required when field mode=prod") {
 		t.Errorf("expected cross-field dependency validation error, got: %v", err)
 	}
 
 	ric = RequiredIfConfig{Mode: "dev", Token: "abc", Webhook: ""} // Token is filled -> Webhook becomes required.
-	if err := Validate(&ric); err == nil || !strings.Contains(err.Error(), "field Webhook:") {
+	if err := Validate(&ric); err == nil || !strings.Contains(err.Error(), "field webhook:") {
 		t.Errorf("expected cross-field non-empty macro requirement error, got: %v", err)
 	}
 
 	// 5. Verify the Error Aggregation engine behavior.
 	type AggregatedConfig struct {
-		Age  int    `validate:"min=18"`
-		Code string `validate:"minlen=5"`
+		Age  int    `yaml:"age" validate:"min=18"`
+		Code string `yaml:"code" validate:"minlen=5"`
 	}
 	ac := AggregatedConfig{Age: 10, Code: "go"} // Triggers 2 separate validation failures simultaneously.
 	err := Validate(&ac)
@@ -476,7 +474,24 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 	}
 
 	errStr := err.Error()
-	if !strings.Contains(errStr, "Age:") || !strings.Contains(errStr, "Code:") {
+	if !strings.Contains(errStr, "age:") || !strings.Contains(errStr, "code:") {
 		t.Errorf("expected multi-line aggregated error message payload stack, got:\n%s", errStr)
+	}
+
+	// 6. Verify negation operator "!" inside conditional cross-field checking properties.
+	type NegationRequiredIfConfig struct {
+		Role   string `yaml:"role"`
+		Secret string `yaml:"secret" validate:"required_if=Role:!observer"`
+	}
+
+	nc := NegationRequiredIfConfig{Role: "admin", Secret: ""}
+	errNeg := Validate(&nc)
+	if errNeg == nil || !strings.Contains(errNeg.Error(), "is required when field role=admin") {
+		t.Errorf("expected negative cross-field dependency validation error, got: %v", errNeg)
+	}
+
+	ncSuccess := NegationRequiredIfConfig{Role: "observer", Secret: ""}
+	if errNegSucc := Validate(&ncSuccess); errNegSucc != nil {
+		t.Errorf("negated status match should bypass mandatory checking, got error: %v", errNegSucc)
 	}
 }

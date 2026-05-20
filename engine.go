@@ -1,7 +1,6 @@
 package yaml
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -14,7 +13,7 @@ import (
 	"unicode/utf8"
 )
 
-// durationType caches the reflect.Type of time.Duration for efficient type matching.
+// durationType caches the reflect.Type of time.Duration for efficient type matching metrics.
 var durationType = reflect.TypeOf(time.Duration(0))
 
 // SetDefaults recursively walks through the exported fields of a structure pointer
@@ -24,7 +23,7 @@ var durationType = reflect.TypeOf(time.Duration(0))
 // execution and take absolute precedence over standard tag defaults.
 //
 // It returns an error if a design conflict is detected where both 'default' and
-// 'not_empty' validation constraints are declared on the same structure field.
+// 'not_empty' validate constraints are declared on the same structure field.
 func SetDefaults(ptr interface{}) error {
 	v := reflect.ValueOf(ptr)
 	if v.Kind() != reflect.Pointer || v.IsNil() {
@@ -47,12 +46,10 @@ func setDefaultsValue(v reflect.Value) error {
 			validateTag, hasValidate := fieldType.Tag.Lookup("validate")
 			defaultValStr, hasDefault := fieldType.Tag.Lookup("default")
 
-			// Validate architectural design integrity during tag compilation
 			if hasDefault && hasValidate && strings.Contains(validateTag, "not_empty") {
 				return fmt.Errorf("field %s is invalid: 'default' and 'not_empty' are mutually exclusive", fieldType.Name)
 			}
 
-			// Safe fallback loop step for legacy internal property wrappers
 			if fieldType.Name == "Value" {
 				if err := setDefaultsValue(fieldVal); err != nil {
 					return err
@@ -60,14 +57,13 @@ func setDefaultsValue(v reflect.Value) error {
 				continue
 			}
 
-			// Safely instantiate and populate uninitialized slices (e.g. default:"h2,http/1.1")
 			if fieldVal.Kind() == reflect.Slice {
 				if hasDefault && fieldVal.IsZero() {
 					if fieldVal.Type().Elem().Kind() == reflect.String {
 						elements := strings.Split(defaultValStr, ",")
 						sliceValues := reflect.MakeSlice(fieldVal.Type(), len(elements), len(elements))
 						for idx, elem := range elements {
-							sliceValues.Index(idx).SetString(strings.TrimSpace(elem))
+							sliceValues.Index(idx).Set(reflect.ValueOf(strings.TrimSpace(elem)))
 						}
 						fieldVal.Set(sliceValues)
 					}
@@ -78,7 +74,6 @@ func setDefaultsValue(v reflect.Value) error {
 				continue
 			}
 
-			// Deep recursive processing step for downstream nested structures and maps
 			if fieldVal.Kind() == reflect.Struct || fieldVal.Kind() == reflect.Map {
 				if err := setDefaultsValue(fieldVal); err != nil {
 					return err
@@ -90,7 +85,6 @@ func setDefaultsValue(v reflect.Value) error {
 			var targetValStr string
 			var hasValueToSet bool
 
-			// Priority 1: System environment variable evaluation override
 			if envVarName != "" {
 				if envVal, isSet := os.LookupEnv(envVarName); isSet && envVal != "" {
 					targetValStr = envVal
@@ -98,18 +92,14 @@ func setDefaultsValue(v reflect.Value) error {
 				}
 			}
 
-			// Priority 2: Fallback to static tag configuration defaults
 			if !hasValueToSet && hasDefault {
 				targetValStr = defaultValStr
 				hasValueToSet = true
 			}
 
-			// Determine if a live environment variable requires an explicit override layer
-			// over an already parsed struct configuration value
 			isEnvOverride := envVarName != "" && os.Getenv(envVarName) != ""
 
 			if hasValueToSet && (fieldVal.IsZero() || isEnvOverride) {
-				// Parse specialized duration configuration syntax
 				if fieldVal.Type() == durationType {
 					d, err := time.ParseDuration(targetValStr)
 					if err != nil {
@@ -195,9 +185,9 @@ func parseValidateTag(tag string) map[string]string {
 	}
 
 	markers := []string{
-		"required_if=", "mincount=", "maxcount=", "endpoint", "not_empty",
+		"mincount=", "maxcount=", "endpoint", "not_empty",
 		"regexp=", "choice=", "minlen=", "maxlen=", "format=",
-		"min=", "max=", "url", "lt=", "gt=",
+		"min=", "max=", "url", "lt=", "gt=", "required_if=",
 	}
 	workingTag := tag
 
@@ -268,16 +258,14 @@ func parseValidateTag(tag string) map[string]string {
 }
 
 // Validate executes deep, recursive structural checks across the application configuration models.
-// It aggregates all validation errors found across the structure using an error slice mapping strategy.
+// It gathers all validation faults into a composite error stack instead of exiting early.
 func Validate(ptr interface{}) error {
 	v := reflect.ValueOf(ptr)
 	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return nil
 	}
-
 	var errs []error
 	validateValue(v.Elem(), "", nil, v.Elem(), &errs)
-
 	if len(errs) > 0 {
 		var sb strings.Builder
 		for i, err := range errs {
@@ -286,7 +274,7 @@ func Validate(ptr interface{}) error {
 			}
 			sb.WriteString(err.Error())
 		}
-		return errors.New(sb.String())
+		return fmt.Errorf("%s", sb.String())
 	}
 	return nil
 }
@@ -303,42 +291,67 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 	}
 
 	if len(rules) > 0 {
-		// --- REQUIRED_IF VALIDATION BLOCK ---
+		// 1.1. Basic check for unconditional field requirement
+		if _, hasNotEmpty := rules["not_empty"]; hasNotEmpty && v.IsZero() {
+			*errs = append(*errs, fmt.Errorf("field %s: is empty, but required by 'not_empty'", currentPath))
+		}
+
+		// 1.2. Cross-field conditional validation execution (required_if) positioned at top tier level
 		if reqIfStr, hasReqIf := rules["required_if"]; hasReqIf {
 			parts := strings.SplitN(reqIfStr, ":", 2)
 			if len(parts) == 2 {
 				targetFieldName := parts[0]
-				targetExpectedValue := parts[1]
+				expectedValue := parts[1]
 
-				targetField := root.FieldByName(targetFieldName)
-				if targetField.IsValid() {
-					isMatch := false
-					actualValStr := fmt.Sprintf("%v", targetField.Interface())
+				// Resolve targets from names or mapping configurations dynamically
+				var targetField reflect.Value
+				yamlTargetName := strings.ToLower(targetFieldName)
 
-					switch targetExpectedValue {
-					case "empty":
-						if targetField.IsZero() {
-							isMatch = true
-						}
-					case "not_empty":
-						if !targetField.IsZero() {
-							isMatch = true
-						}
-					default:
-						if actualValStr == targetExpectedValue {
-							isMatch = true
+				if root.Kind() == reflect.Struct {
+					rt := root.Type()
+					for i := 0; i < root.NumField(); i++ {
+						f := rt.Field(i)
+						tag := f.Tag.Get("yaml")
+						tagParts := strings.Split(tag, ",")
+						if f.Name == targetFieldName || (len(tagParts) > 0 && tagParts[0] == targetFieldName) {
+							targetField = root.Field(i)
+							yamlTargetName = tagParts[0]
+							if yamlTargetName == "" {
+								yamlTargetName = strings.ToLower(f.Name)
+							}
+							break
 						}
 					}
+				}
 
-					if isMatch && v.IsZero() {
-						*errs = append(*errs, fmt.Errorf("field %s: is required when field %s is %s", currentPath, targetFieldName, targetExpectedValue))
+				if targetField.IsValid() {
+					actualValueStr := fmt.Sprintf("%v", targetField.Interface())
+					if targetField.Kind() == reflect.String {
+						actualValueStr = targetField.String()
+					}
+
+					conditionMet := false
+					isNegation := strings.HasPrefix(expectedValue, "!")
+					cleanExpectedValue := strings.TrimPrefix(expectedValue, "!")
+
+					switch cleanExpectedValue {
+					case "empty":
+						conditionMet = targetField.IsZero()
+					case "not_empty":
+						conditionMet = !targetField.IsZero()
+					default:
+						conditionMet = (actualValueStr == cleanExpectedValue)
+					}
+
+					if isNegation {
+						conditionMet = !conditionMet
+					}
+
+					if conditionMet && v.IsZero() {
+						*errs = append(*errs, fmt.Errorf("field %s: is required when field %s=%s", currentPath, yamlTargetName, actualValueStr))
 					}
 				}
 			}
-		}
-
-		if _, hasNotEmpty := rules["not_empty"]; hasNotEmpty && v.IsZero() {
-			*errs = append(*errs, fmt.Errorf("field %s: is empty, but required by 'not_empty'", currentPath))
 		}
 
 		isCollectionElement := strings.Contains(currentPath, "[")
@@ -354,24 +367,8 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 		maxCountStr, hasMaxCount := rules["maxcount"]
 		formatStr, hasFormat := rules["format"]
 
-		// --- CONFIGURATION EXCLUSIVITY MUTEX CHECKS ---
-		formatRulesCount := 0
-		if hasFormat {
-			formatRulesCount++
-		}
-		if _, hasEndpoint := rules["endpoint"]; hasEndpoint {
-			formatRulesCount++
-		}
-		if _, hasURL := rules["url"]; hasURL {
-			formatRulesCount++
-		}
-		if formatRulesCount > 1 {
-			*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: networking and layout tags ('format', 'endpoint', 'url') are mutually exclusive", currentPath))
-			return
-		}
-
 		if (hasMin && hasGt) || (hasMax && hasLt) {
-			*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: cannot mix inclusive and exclusive bounds", currentPath))
+			*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: conflicting boundaries metrics", currentPath))
 			return
 		}
 
@@ -379,6 +376,24 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 		hasAnyMaxBound := hasMax || hasLt
 
 		if !v.IsZero() || isCollectionElement || hasAnyMinBound || hasAnyMaxBound || hasMinLen || hasMaxLen || hasMinCount || hasMaxCount {
+
+			if hasFormat || rules["endpoint"] != "" || rules["url"] != "" {
+				mutIdx := 0
+				if hasFormat {
+					mutIdx++
+				}
+				if _, ok := rules["endpoint"]; ok {
+					mutIdx++
+				}
+				if _, ok := rules["url"]; ok {
+					mutIdx++
+				}
+				if mutIdx > 1 {
+					*errs = append(*errs, fmt.Errorf("field %s: invalid configuration: format rules are strictly mutually exclusive", currentPath))
+					return
+				}
+			}
+
 			if choiceStr, hasChoice := rules["choice"]; hasChoice && v.Kind() == reflect.String {
 				valStr := v.String()
 				allowedChoices := strings.Split(choiceStr, ",")
@@ -421,14 +436,14 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 				}
 			}
 
-			if _, hasEndpoint := rules["endpoint"]; hasEndpoint && v.Kind() == reflect.String {
+			if _, hasHostPort := rules["endpoint"]; hasHostPort && v.Kind() == reflect.String {
 				valStr := v.String()
 				host, port, err := net.SplitHostPort(valStr)
 				if err != nil {
 					*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid host:port format: %w", currentPath, valStr, err))
 				} else {
-					p, err := strconv.Atoi(port)
-					if err != nil || p < 1 || p > 65535 {
+					p, pErr := strconv.Atoi(port)
+					if pErr != nil || p < 1 || p > 65535 {
 						*errs = append(*errs, fmt.Errorf("field %s: value %q contains an invalid port number", currentPath, valStr))
 					}
 					if strings.Contains(host, ":") {
@@ -453,10 +468,31 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 				}
 			}
 
-			// --- UNICODE RUNE-COUNT BASED STRING LENGTH CHECK ---
+			if hasFormat && v.Kind() == reflect.String {
+				valStr := v.String()
+				switch formatStr {
+				case "ip":
+					if ip := net.ParseIP(valStr); ip == nil {
+						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IP address", currentPath, valStr))
+					}
+				case "ipv4":
+					if ip := net.ParseIP(valStr); ip == nil || ip.To4() == nil {
+						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IPv4 address", currentPath, valStr))
+					}
+				case "ipv6":
+					if ip := net.ParseIP(valStr); ip == nil || ip.To4() != nil {
+						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IPv6 address", currentPath, valStr))
+					}
+				case "uuid":
+					matched, _ := regexp.MatchString(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`, valStr)
+					if !matched {
+						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid UUID", currentPath, valStr))
+					}
+				}
+			}
+
 			if (hasMinLen || hasMaxLen) && v.Kind() == reflect.String {
 				strLen := utf8.RuneCountInString(v.String())
-
 				var minLen, maxLen int
 				var err error
 				if hasMinLen {
@@ -467,26 +503,22 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 				}
 				if err != nil || minLen < 0 || maxLen < 0 {
 					*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration for string length limits", currentPath))
-					return
-				}
-
-				if hasMinLen && hasMaxLen && minLen > maxLen {
-					*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: minlen (%d) cannot be greater than maxlen (%d)", currentPath, minLen, maxLen))
-					return
-				}
-
-				if hasMinLen && strLen < minLen {
-					*errs = append(*errs, fmt.Errorf("field %s: string length %d is less than minlen %s", currentPath, strLen, minLenStr))
-				}
-				if hasMaxLen && strLen > maxLen {
-					*errs = append(*errs, fmt.Errorf("field %s: string length %d exceeds maxlen %s", currentPath, strLen, maxLenStr))
+				} else {
+					if hasMinLen && hasMaxLen && minLen > maxLen {
+						*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: minlen (%d) cannot be greater than maxlen (%d)", currentPath, minLen, maxLen))
+					} else {
+						if hasMinLen && strLen < minLen {
+							*errs = append(*errs, fmt.Errorf("field %s: string length %d is less than minlen %s", currentPath, strLen, minLenStr))
+						}
+						if hasMaxLen && strLen > maxLen {
+							*errs = append(*errs, fmt.Errorf("field %s: string length %d exceeds maxlen %s", currentPath, strLen, maxLenStr))
+						}
+					}
 				}
 			}
 
-			// --- COLLECTION CAPACITY CHECK ---
 			if (hasMinCount || hasMaxCount) && (v.Kind() == reflect.Slice || v.Kind() == reflect.Map) {
 				count := v.Len()
-
 				var minCount, maxCount int
 				var err error
 				if hasMinCount {
@@ -496,51 +528,24 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 					maxCount, err = strconv.Atoi(maxCountStr)
 				}
 				if err != nil || minCount < 0 || maxCount < 0 {
-					*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration for collection count limits", currentPath))
-					return
+					if hasMaxCount && maxCountStr != "" {
+						maxCount, _ = strconv.Atoi(maxCountStr)
+					}
 				}
-
 				if hasMinCount && hasMaxCount && minCount > maxCount {
 					*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: mincount (%d) cannot be greater than maxcount (%d)", currentPath, minCount, maxCount))
-					return
-				}
-
-				if hasMinCount && count < minCount {
-					*errs = append(*errs, fmt.Errorf("field %s: collection size %d is less than mincount %s", currentPath, count, minCountStr))
-				}
-				if hasMaxCount && count > maxCount {
-					*errs = append(*errs, fmt.Errorf("field %s: collection size %d exceeds maxcount %s", currentPath, count, maxCountStr))
-				}
-			}
-
-			// --- DYNAMIC DATA FORMAT VALIDATION LAYER ---
-			if hasFormat && v.Kind() == reflect.String {
-				valStr := v.String()
-				switch formatStr {
-				case "ip":
-					if net.ParseIP(valStr) == nil {
-						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IP address", currentPath, valStr))
+				} else {
+					if hasMinCount && count < minCount {
+						*errs = append(*errs, fmt.Errorf("field %s: collection size %d is less than mincount %s", currentPath, count, minCountStr))
 					}
-				case "ipv4":
-					parsedIP := net.ParseIP(valStr)
-					if parsedIP == nil || parsedIP.To4() == nil {
-						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IPv4 address", currentPath, valStr))
-					}
-				case "ipv6":
-					parsedIP := net.ParseIP(valStr)
-					if parsedIP == nil || parsedIP.To4() != nil {
-						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IPv6 address", currentPath, valStr))
-					}
-				case "uuid":
-					uuidRegex := regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-					if !uuidRegex.MatchString(valStr) {
-						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid UUID", currentPath, valStr))
+					if hasMaxCount && count > maxCount {
+						*errs = append(*errs, fmt.Errorf("field %s: collection size %d exceeds maxcount %s", currentPath, count, maxCountStr))
 					}
 				}
 			}
 
-			// --- EXTENDED NUMERIC & TIME.DURATION BOUNDARIES CHECK ---
 			if hasAnyMinBound || hasAnyMaxBound {
+				kind := v.Kind()
 				if v.Type() == durationType {
 					val := v.Interface().(time.Duration)
 					var minVal, maxVal, ltVal, gtVal time.Duration
@@ -558,33 +563,25 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 						gtVal, err = time.ParseDuration(gtStr)
 					}
 					if err != nil {
-						*errs = append(*errs, fmt.Errorf("field %s: failed to parse duration constraint: %w", currentPath, err))
-						return
-					}
-
-					if hasMin && hasMax && minVal > maxVal {
-						*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: min > max", currentPath))
-						return
-					}
-					if hasGt && hasLt && gtVal >= ltVal {
-						*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: gt >= lt", currentPath))
-						return
-					}
-
-					if hasMin && val < minVal {
-						*errs = append(*errs, fmt.Errorf("field %s: value %v < min %s", currentPath, val, minStr))
-					}
-					if hasGt && val <= gtVal {
-						*errs = append(*errs, fmt.Errorf("field %s: value %v must be > %s", currentPath, val, gtStr))
-					}
-					if hasMax && val > maxVal {
-						*errs = append(*errs, fmt.Errorf("field %s: value %v > max %s", currentPath, val, maxStr))
-					}
-					if hasLt && val >= ltVal {
-						*errs = append(*errs, fmt.Errorf("field %s: value %v must be < %s", currentPath, val, ltStr))
+						*errs = append(*errs, fmt.Errorf("field %s: parse duration limit error: %w", currentPath, err))
+					} else {
+						if hasMin && hasMax && minVal > maxVal {
+							*errs = append(*errs, fmt.Errorf("field %s: configuration error: min %v > max %v", currentPath, minVal, maxVal))
+						}
+						if hasMin && val < minVal {
+							*errs = append(*errs, fmt.Errorf("field %s: value %v < min %s", currentPath, val, minStr))
+						}
+						if hasMax && val > maxVal {
+							*errs = append(*errs, fmt.Errorf("field %s: value %v > max %s", currentPath, val, maxStr))
+						}
+						if hasLt && val >= ltVal {
+							*errs = append(*errs, fmt.Errorf("field %s: value %v must be < %s", currentPath, val, ltStr))
+						}
+						if hasGt && val <= gtVal {
+							*errs = append(*errs, fmt.Errorf("field %s: value %v must be > %s", currentPath, val, gtStr))
+						}
 					}
 				} else {
-					kind := v.Kind()
 					switch {
 					case kind >= reflect.Int && kind <= reflect.Int64:
 						val := v.Int()
@@ -603,30 +600,23 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 							gtVal, err = strconv.ParseInt(gtStr, 10, 64)
 						}
 						if err != nil {
-							*errs = append(*errs, fmt.Errorf("field %s: parse error: %w", currentPath, err))
-							return
-						}
-
-						if hasMin && hasMax && minVal > maxVal {
-							*errs = append(*errs, fmt.Errorf("field %s: configuration error: min > max", currentPath))
-							return
-						}
-						if hasGt && hasLt && gtVal >= ltVal {
-							*errs = append(*errs, fmt.Errorf("field %s: configuration error: gt >= lt", currentPath))
-							return
-						}
-
-						if hasMin && val < minVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d < min %s", currentPath, val, minStr))
-						}
-						if hasGt && val <= gtVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d must be > %s", currentPath, val, gtStr))
-						}
-						if hasMax && val > maxVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d > max %s", currentPath, val, maxStr))
-						}
-						if hasLt && val >= ltVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d must be < %s", currentPath, val, ltStr))
+							*errs = append(*errs, fmt.Errorf("field %s: parse limit error: %w", currentPath, err))
+						} else {
+							if hasMin && hasMax && minVal > maxVal {
+								*errs = append(*errs, fmt.Errorf("field %s: configuration error: min %d > max %d", currentPath, minVal, maxVal))
+							}
+							if hasMin && val < minVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d < min %s", currentPath, val, minStr))
+							}
+							if hasMax && val > maxVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d > max %s", currentPath, val, maxStr))
+							}
+							if hasLt && val >= ltVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d must be < %s", currentPath, val, ltStr))
+							}
+							if hasGt && val <= gtVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d must be > %s", currentPath, val, gtStr))
+							}
 						}
 
 					case kind >= reflect.Uint && kind <= reflect.Uint64:
@@ -654,29 +644,22 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 						}
 						if err != nil {
 							*errs = append(*errs, fmt.Errorf("field %s: %w", currentPath, err))
-							return
-						}
-
-						if hasMin && hasMax && minVal > maxVal {
-							*errs = append(*errs, fmt.Errorf("field %s: configuration error: min > max", currentPath))
-							return
-						}
-						if hasGt && hasLt && gtVal >= ltVal {
-							*errs = append(*errs, fmt.Errorf("field %s: configuration error: gt >= lt", currentPath))
-							return
-						}
-
-						if hasMin && val < minVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d < min %s", currentPath, val, minStr))
-						}
-						if hasGt && val <= gtVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d must be > %s", currentPath, val, gtStr))
-						}
-						if hasMax && val > maxVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d > max %s", currentPath, val, maxStr))
-						}
-						if hasLt && val >= ltVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %d must be < %s", currentPath, val, ltStr))
+						} else {
+							if hasMin && hasMax && minVal > maxVal {
+								*errs = append(*errs, fmt.Errorf("field %s: configuration error: min %d > max %d", currentPath, minVal, maxVal))
+							}
+							if hasMin && val < minVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d < min %s", currentPath, val, minStr))
+							}
+							if hasMax && val > maxVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d > max %s", currentPath, val, maxStr))
+							}
+							if hasLt && val >= ltVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d must be < %s", currentPath, val, ltStr))
+							}
+							if hasGt && val <= gtVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %d must be > %s", currentPath, val, gtStr))
+							}
 						}
 
 					case kind == reflect.Float32 || kind == reflect.Float64:
@@ -696,30 +679,23 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 							gtVal, err = strconv.ParseFloat(gtStr, 64)
 						}
 						if err != nil {
-							*errs = append(*errs, fmt.Errorf("field %s: parse error: %w", currentPath, err))
-							return
-						}
-
-						if hasMin && hasMax && minVal > maxVal {
-							*errs = append(*errs, fmt.Errorf("field %s: configuration error: min > max", currentPath))
-							return
-						}
-						if hasGt && hasLt && gtVal >= ltVal {
-							*errs = append(*errs, fmt.Errorf("field %s: configuration error: gt >= lt", currentPath))
-							return
-						}
-
-						if hasMin && val < minVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %f < min %s", currentPath, val, minStr))
-						}
-						if hasGt && val <= gtVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %f must be > %s", currentPath, val, gtStr))
-						}
-						if hasMax && val > maxVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %f > max %s", currentPath, val, maxStr))
-						}
-						if hasLt && val >= ltVal {
-							*errs = append(*errs, fmt.Errorf("field %s: value %f must be < %s", currentPath, val, ltStr))
+							*errs = append(*errs, fmt.Errorf("field %s: parse float error: %w", currentPath, err))
+						} else {
+							if hasMin && hasMax && minVal > maxVal {
+								*errs = append(*errs, fmt.Errorf("field %s: configuration error: min %f > max %f", currentPath, minVal, maxVal))
+							}
+							if hasMin && val < minVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %f < min %s", currentPath, val, minStr))
+							}
+							if hasMax && val > maxVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %f > max %s", currentPath, val, maxStr))
+							}
+							if hasLt && val >= ltVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %f must be < %s", currentPath, val, ltStr))
+							}
+							if hasGt && val <= gtVal {
+								*errs = append(*errs, fmt.Errorf("field %s: value %f must be > %s", currentPath, val, gtStr))
+							}
 						}
 					}
 				}
@@ -727,17 +703,26 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 		}
 	}
 
-	// Step 2: Traverse downstream recursively based on structural target types topology
 	switch v.Kind() {
 	case reflect.Struct:
 		t := v.Type()
 		for i := 0; i < v.NumField(); i++ {
 			fieldVal := v.Field(i)
 			fieldType := t.Field(i)
-			nextPath := fieldType.Name
-			if currentPath != "" {
-				nextPath = currentPath + "." + fieldType.Name
+
+			// Resolve explicit tag mapping to construct beautiful target names layouts
+			yamlName := fieldType.Tag.Get("yaml")
+			if yamlName == "" {
+				yamlName = strings.ToLower(fieldType.Name)
+			} else {
+				yamlName = strings.Split(yamlName, ",")[0]
 			}
+
+			nextPath := yamlName
+			if currentPath != "" {
+				nextPath = currentPath + "." + yamlName
+			}
+
 			if fieldType.Name == "Value" {
 				validateValue(fieldVal, currentPath, rules, root, errs)
 				continue
