@@ -177,83 +177,133 @@ func setDefaultsValue(v reflect.Value) error {
 }
 
 // parseValidateTag tokenizes the validation tag string into separate rule mappings.
-// It isolates parameters even if they contain punctuation like commas (e.g. inside regex patterns).
+// It isolates parameters even if they contain punctuation like commas (e.g. inside regex patterns or quoted values).
 func parseValidateTag(tag string) map[string]string {
 	rules := make(map[string]string)
 	if tag == "" {
 		return rules
 	}
 
-	markers := []string{
+	// Known rules (with = for parameterized, without for flags)
+	allRules := []string{
 		"mincount=", "maxcount=", "endpoint", "not_empty",
 		"regexp=", "choice=", "minlen=", "maxlen=", "format=",
 		"min=", "max=", "url", "lt=", "gt=", "required_if=",
 	}
-	workingTag := tag
 
-	for {
-		firstIdx := -1
-		firstMarker := ""
-		for _, m := range markers {
-			idx := strings.Index(workingTag, m)
-			if idx != -1 && (firstIdx == -1 || idx < firstIdx) {
-				firstIdx = idx
-				firstMarker = m
+	// isRuleStart checks if position idx starts with a known rule
+	isRuleStart := func(s string, idx int) bool {
+		for _, rule := range allRules {
+			if strings.HasPrefix(s[idx:], rule) {
+				return true
 			}
 		}
-
-		if firstIdx == -1 {
-			remaining := strings.TrimSpace(workingTag)
-			remaining = strings.Trim(remaining, ",")
-			remaining = strings.TrimSpace(remaining)
-			if remaining == "not_empty" || remaining == "endpoint" || remaining == "url" {
-				rules[remaining] = ""
-			}
-			break
-		}
-
-		before := workingTag[:firstIdx]
-		if strings.Contains(before, "not_empty") {
-			rules["not_empty"] = ""
-		}
-		if strings.Contains(before, "endpoint") {
-			rules["endpoint"] = ""
-		}
-		if strings.Contains(before, "url") {
-			rules["url"] = ""
-		}
-
-		workingTag = workingTag[firstIdx+len(firstMarker):]
-
-		nextIdx := -1
-		for _, m := range markers {
-			idx := strings.Index(workingTag, m)
-			if idx != -1 && (nextIdx == -1 || idx < nextIdx) {
-				nextIdx = idx
-			}
-		}
-
-		var value string
-		if nextIdx == -1 {
-			value = workingTag
-			workingTag = ""
-		} else {
-			value = workingTag[:nextIdx]
-			workingTag = workingTag[nextIdx:]
-		}
-
-		value = strings.TrimSpace(value)
-		value = strings.TrimSuffix(value, ",")
-		value = strings.TrimPrefix(value, ",")
-		value = strings.TrimSpace(value)
-
-		key := strings.TrimSuffix(firstMarker, "=")
-		rules[key] = value
-
-		if workingTag == "" {
-			break
-		}
+		return false
 	}
+
+	i := 0
+	n := len(tag)
+
+	for i < n {
+		// Skip delimiters
+		for i < n && (tag[i] == ',' || tag[i] == ' ' || tag[i] == '\t') {
+			i++
+		}
+		if i >= n {
+			break
+		}
+
+		// Find which rule starts here
+		foundRule := ""
+		ruleLen := 0
+		isParam := false
+
+		for _, rule := range allRules {
+			if strings.HasPrefix(tag[i:], rule) {
+				afterRule := i + len(rule)
+				if strings.HasSuffix(rule, "=") {
+					// Parameterized rule
+					foundRule = strings.TrimSuffix(rule, "=")
+					ruleLen = len(rule)
+					isParam = true
+					break
+				} else {
+					// Flag rule - ensure it's not a prefix of another word
+					if afterRule >= n {
+						foundRule = rule
+						ruleLen = len(rule)
+						break
+					}
+					nextCh := tag[afterRule]
+					if nextCh == ',' || nextCh == ' ' || nextCh == '\t' || nextCh == '=' {
+						foundRule = rule
+						ruleLen = len(rule)
+						break
+					}
+				}
+			}
+		}
+
+		if foundRule == "" {
+			// Unknown rule, skip to next comma
+			for i < n && tag[i] != ',' {
+				i++
+			}
+			if i < n {
+				i++
+			}
+			continue
+		}
+
+		i += ruleLen
+
+		if !isParam {
+			rules[foundRule] = ""
+			continue
+		}
+
+		// Parse parameter value, respecting quotes
+		var value strings.Builder
+		inQuotes := false
+		quoteChar := byte(0)
+
+		for i < n {
+			ch := tag[i]
+
+			// Handle quote boundaries
+			if (ch == '\'' || ch == '"') && !inQuotes {
+				inQuotes = true
+				quoteChar = ch
+				value.WriteByte(ch)
+				i++
+				continue
+			}
+			if ch == quoteChar && inQuotes {
+				inQuotes = false
+				quoteChar = 0
+				value.WriteByte(ch)
+				i++
+				continue
+			}
+
+			// Check for rule-separating comma
+			if ch == ',' && !inQuotes {
+				lookahead := i + 1
+				for lookahead < n && (tag[lookahead] == ' ' || tag[lookahead] == '\t') {
+					lookahead++
+				}
+				if lookahead >= n || isRuleStart(tag, lookahead) {
+					break
+				}
+			}
+
+			value.WriteByte(ch)
+			i++
+		}
+
+		rules[foundRule] = strings.TrimSpace(value.String())
+	}
+
 	return rules
 }
 
@@ -367,6 +417,8 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 		maxCountStr, hasMaxCount := rules["maxcount"]
 		formatStr, hasFormat := rules["format"]
 
+		_, hasChoice := rules["choice"]
+
 		if (hasMin && hasGt) || (hasMax && hasLt) {
 			*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: conflicting boundaries metrics", currentPath))
 			return
@@ -375,7 +427,8 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 		hasAnyMinBound := hasMin || hasGt
 		hasAnyMaxBound := hasMax || hasLt
 
-		if !v.IsZero() || isCollectionElement || hasAnyMinBound || hasAnyMaxBound || hasMinLen || hasMaxLen || hasMinCount || hasMaxCount {
+		if !v.IsZero() || isCollectionElement || hasAnyMinBound || hasAnyMaxBound ||
+			hasMinLen || hasMaxLen || hasMinCount || hasMaxCount || hasChoice {
 
 			if hasFormat || rules["endpoint"] != "" || rules["url"] != "" {
 				mutIdx := 0
@@ -396,32 +449,39 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 
 			if choiceStr, hasChoice := rules["choice"]; hasChoice && v.Kind() == reflect.String {
 				valStr := v.String()
-				allowedChoices := strings.Split(choiceStr, ",")
+				allowedChoices := parseChoiceValues(choiceStr)
+
+				// Определяем режим: whitelist или blacklist
 				isBlacklist := true
 				for _, c := range allowedChoices {
-					c = strings.TrimSpace(c)
 					if c != "" && !strings.HasPrefix(c, "!") {
 						isBlacklist = false
 						break
 					}
 				}
+
 				if isBlacklist {
 					for _, c := range allowedChoices {
-						forbidden := strings.TrimPrefix(strings.TrimSpace(c), "!")
+						forbidden := strings.TrimPrefix(c, "!")
 						if valStr == forbidden {
-							*errs = append(*errs, fmt.Errorf("field %s: value %q is forbidden by blacklist [%s]", currentPath, valStr, choiceStr))
+							*errs = append(*errs, fmt.Errorf("field %s: value %q is forbidden by blacklist", currentPath, valStr))
 						}
 					}
 				} else {
+					// Whitelist mode: просто проверяем вхождение
 					isValid := false
 					for _, c := range allowedChoices {
-						if valStr == strings.TrimSpace(c) {
+						if valStr == c {
 							isValid = true
 							break
 						}
 					}
 					if !isValid {
-						*errs = append(*errs, fmt.Errorf("field %s: value %q is invalid; allowed choices are [%s]", currentPath, valStr, choiceStr))
+						displayChoices := make([]string, len(allowedChoices))
+						for i, c := range allowedChoices {
+							displayChoices[i] = fmt.Sprintf("%q", c)
+						}
+						*errs = append(*errs, fmt.Errorf("field %s: value %q is invalid; allowed choices are [%s]", currentPath, valStr, strings.Join(displayChoices, ", ")))
 					}
 				}
 			}
@@ -742,4 +802,50 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 			validateValue(v.MapIndex(key), fmt.Sprintf("%s[%v]", currentPath, key.Interface()), rules, root, errs)
 		}
 	}
+}
+
+// parseChoiceValues парсит строку вида "val1,'val,with,comma',val2"
+// с поддержкой кавычек для значений, содержащих запятые.
+// Возвращает слайс значений без внешних кавычек.
+func parseChoiceValues(input string) []string {
+	var result []string
+	var current strings.Builder
+	inQuotes := false
+	quoteChar := byte(0)
+
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+
+		// Handle quote start/end - don't include quotes in output
+		if (ch == '\'' || ch == '"') && !inQuotes {
+			inQuotes = true
+			quoteChar = ch
+			continue
+		}
+		if ch == quoteChar && inQuotes {
+			inQuotes = false
+			quoteChar = 0
+			continue
+		}
+
+		// Separator only outside quotes
+		if ch == ',' && !inQuotes {
+			val := strings.TrimSpace(current.String())
+			if val != "" {
+				result = append(result, val)
+			}
+			current.Reset()
+			continue
+		}
+
+		current.WriteByte(ch)
+	}
+
+	// Add last value
+	val := strings.TrimSpace(current.String())
+	if val != "" {
+		result = append(result, val)
+	}
+
+	return result
 }

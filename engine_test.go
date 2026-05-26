@@ -2,6 +2,7 @@ package yaml
 
 import (
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -493,5 +494,169 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 	ncSuccess := NegationRequiredIfConfig{Role: "observer", Secret: ""}
 	if errNegSucc := Validate(&ncSuccess); errNegSucc != nil {
 		t.Errorf("negated status match should bypass mandatory checking, got error: %v", errNegSucc)
+	}
+}
+
+func TestChoiceWithCommas(t *testing.T) {
+	type Config struct {
+		Order string `yaml:"order" validate:"choice='allow,deny','deny,allow'"`
+	}
+
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"valid: allow,deny", "allow,deny", false},
+		{"valid: deny,allow", "deny,allow", false},
+		{"invalid: allow", "allow", true},
+		{"invalid: deny", "deny", true},
+		{"invalid: empty", "", true}, // ← Теперь будет работать!
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg Config
+			cfg.Order = tt.value
+			err := Validate(&cfg)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestChoiceWithQuotesAndSpaces(t *testing.T) {
+	type Config struct {
+		Mode string `yaml:"mode" validate:"choice='read,write', 'read-only', 'write-only'"`
+	}
+
+	var cfg Config
+	cfg.Mode = "read,write"
+	err := Validate(&cfg)
+	if err != nil {
+		t.Errorf("Expected valid, got error: %v", err)
+	}
+
+	cfg.Mode = "read-only"
+	err = Validate(&cfg)
+	if err != nil {
+		t.Errorf("Expected valid, got error: %v", err)
+	}
+}
+
+func TestChoiceBlacklistWithCommas(t *testing.T) {
+	type Config struct {
+		Action string `yaml:"action" validate:"choice='!allow,deny','!deny,allow'"`
+	}
+
+	var cfg Config
+	cfg.Action = "allow,deny"
+	err := Validate(&cfg)
+	if err == nil {
+		t.Error("Expected error for blacklisted value")
+	}
+
+	cfg.Action = "other"
+	err = Validate(&cfg)
+	if err != nil {
+		t.Errorf("Expected valid, got error: %v", err)
+	}
+}
+
+func TestValidateTagParsing(t *testing.T) {
+	tests := []struct {
+		name     string
+		tag      string
+		expected map[string]string
+	}{
+		{
+			name: "simple rules",
+			tag:  "not_empty,min=5,max=10",
+			expected: map[string]string{
+				"not_empty": "",
+				"min":       "5",
+				"max":       "10",
+			},
+		},
+		{
+			name: "choice with commas in quotes",
+			tag:  "choice='allow,deny','deny,allow'",
+			expected: map[string]string{
+				"choice": "'allow,deny','deny,allow'",
+			},
+		},
+		{
+			name: "mixed rules with quotes",
+			tag:  "not_empty,choice='a,b','c,d',minlen=3",
+			expected: map[string]string{
+				"not_empty": "",
+				"choice":    "'a,b','c,d'",
+				"minlen":    "3",
+			},
+		},
+		{
+			name: "double quotes support",
+			tag:  `choice="val,ue","other,val"`,
+			expected: map[string]string{
+				"choice": `"val,ue","other,val"`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseValidateTag(tt.tag)
+			if len(result) != len(tt.expected) {
+				t.Errorf("Expected %d rules, got %d: %+v", len(tt.expected), len(result), result)
+				return
+			}
+			for k, v := range tt.expected {
+				if result[k] != v {
+					t.Errorf("Rule %q: expected %q, got %q", k, v, result[k])
+				}
+			}
+		})
+	}
+}
+
+func TestDebugChoiceEmpty(t *testing.T) {
+	type Config struct {
+		Order string `yaml:"order" validate:"choice='allow,deny','deny,allow'"`
+	}
+
+	var cfg Config
+	cfg.Order = "" // явно пустая строка
+
+	// Отладка парсинга тега
+	fieldType := reflect.TypeOf(cfg).Field(0)
+	validateTag, _ := fieldType.Tag.Lookup("validate")
+	t.Logf("validate tag: %q", validateTag)
+
+	rules := parseValidateTag(validateTag)
+	t.Logf("parsed rules: %+v", rules)
+
+	choiceStr, hasChoice := rules["choice"]
+	t.Logf("hasChoice: %v, choiceStr: %q", hasChoice, choiceStr)
+
+	if hasChoice {
+		allowed := parseChoiceValues(choiceStr)
+		t.Logf("allowed choices: %v", allowed)
+		t.Logf("empty string in allowed: %v", func() bool {
+			for _, c := range allowed {
+				if c == "" {
+					return true
+				}
+			}
+			return false
+		}())
+	}
+
+	// Запуск валидации
+	err := Validate(&cfg)
+	t.Logf("Validate result: error=%v", err)
+
+	if err == nil {
+		t.Error("EXPECTED error for empty string, got nil")
 	}
 }
