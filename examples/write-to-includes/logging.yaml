@@ -1,0 +1,4 @@
+level: debug
+colors: true
+caller: true
+stack: false

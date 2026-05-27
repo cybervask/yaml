@@ -27,7 +27,7 @@ func Dump(in any, opts ...Option) (out []byte, err error) {
 	}
 
 	// Isolate tagged fields and write them to external target files
-	if err := extractIncludes(&node, in, "."); err != nil {
+	if err := extractIncludes(&node, in, ".", ""); err != nil {
 		return nil, err
 	}
 

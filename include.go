@@ -10,9 +10,9 @@ import (
 	yaml4 "go.yaml.in/yaml/v4"
 )
 
-// HandleIncludeNode performs a low-level interception of a YAML node.
-// If the node exposes an explicit `!include` marker tag, it reads the external
-// storage file path and parses its contents directly into the target object.
+// HandleIncludeNode intercepts a YAML node during decoding.
+// If the node has a !include tag, it reads the referenced file and unmarshals its contents into the target.
+// Returns true if the node was handled, false otherwise.
 func HandleIncludeNode(value *yaml4.Node, target any) (bool, error) {
 	if value.Tag == "!include" {
 		var filename string
@@ -25,7 +25,6 @@ func HandleIncludeNode(value *yaml4.Node, target any) (bool, error) {
 			return true, fmt.Errorf("failed to read included file %s: %w", filename, err)
 		}
 
-		// Parse the include file recursively on top of pre-existing defaults
 		if err := yaml4.Unmarshal(includeData, target); err != nil {
 			return true, fmt.Errorf("failed to unmarshal included file %s: %w", filename, err)
 		}
@@ -34,17 +33,19 @@ func HandleIncludeNode(value *yaml4.Node, target any) (bool, error) {
 	return false, nil
 }
 
-// resolveIncludes recursively traverses YAML nodes and replaces `!include` scalar
-// tokens with the corresponding Abstract Syntax Tree (AST) generated from external files.
-func resolveIncludes(node *yaml4.Node, currentDir string) error {
-	// Step 1: Check whether the current node represents an include token
+// resolveIncludes recursively traverses a YAML AST and replaces !include scalar nodes
+// with the parsed content from external files.
+//
+// node is the current AST node being processed.
+// currentDir is the base directory for resolving relative include paths.
+// yamlPathPrefix is the dot-separated path to the current field in the configuration structure.
+func resolveIncludes(node *yaml4.Node, currentDir, yamlPathPrefix string) error {
 	if node.Tag == "!include" && node.Kind == yaml4.ScalarNode {
-		filename := node.Value
+		originalPath := node.Value
 
-		// Calculate the correct absolute path relative to the file that triggered the include directive
-		fullPath := filename
-		if !filepath.IsAbs(filename) {
-			fullPath = filepath.Join(currentDir, filename)
+		fullPath := originalPath
+		if !filepath.IsAbs(originalPath) {
+			fullPath = filepath.Join(currentDir, originalPath)
 		}
 
 		includeData, err := os.ReadFile(fullPath)
@@ -57,40 +58,61 @@ func resolveIncludes(node *yaml4.Node, currentDir string) error {
 			return fmt.Errorf("failed to parse included file %s: %w", fullPath, err)
 		}
 
-		// The root node of a parsed file is always a DocumentNode. Its actual payload resides in Content[0].
 		if len(fileNode.Content) == 0 {
 			return fmt.Errorf("included file %s is empty", fullPath)
 		}
 		actualContentNode := fileNode.Content[0]
 
-		// Step 2: Recursively process any nested include declarations inside the newly loaded file.
-		// The base directory shifts to the parent directory of this newly read file.
+		if yamlPathPrefix != "" {
+			RegisterIncludePath(yamlPathPrefix, originalPath, fullPath)
+		}
+
 		newDir := filepath.Dir(fullPath)
-		if err := resolveIncludes(actualContentNode, newDir); err != nil {
+		if err := resolveIncludes(actualContentNode, newDir, yamlPathPrefix); err != nil {
 			return err
 		}
 
-		// Step 3: Replace the current `!include` node with the expanded payload tree
 		*node = *actualContentNode
 		return nil
 	}
 
-	// Step 4: For standard nodes, recursively traverse all child elements (struct fields, sequence elements)
-	for _, child := range node.Content {
-		if err := resolveIncludes(child, currentDir); err != nil {
-			return err
+	if node.Kind == yaml4.MappingNode {
+		for i := 0; i < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+			key := keyNode.Value
+
+			nextPath := key
+			if yamlPathPrefix != "" {
+				nextPath = yamlPathPrefix + "." + key
+			}
+
+			if err := resolveIncludes(valNode, currentDir, nextPath); err != nil {
+				return err
+			}
+		}
+	} else {
+		for _, child := range node.Content {
+			if err := resolveIncludes(child, currentDir, yamlPathPrefix); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
-// extractIncludes scans the AST mapping nodes to locate fields annotated with the include keyword,
-// writes their values to individual configuration files, and drops an `!include` reference in the parent tree.
-func extractIncludes(node *yaml4.Node, currentStruct any, baseDir string) error {
+// extractIncludes scans AST mapping nodes for fields marked with the include tag,
+// writes their values to external files, and replaces them with !include directives in the parent tree.
+//
+// node is the current AST node being processed.
+// currentStruct is the Go struct value corresponding to the current YAML mapping.
+// baseDir is the base directory for resolving relative output paths.
+// yamlPathPrefix is the dot-separated path to the current field in the configuration structure.
+func extractIncludes(node *yaml4.Node, currentStruct any, baseDir, yamlPathPrefix string) error {
 	if node.Kind != yaml4.MappingNode {
 		for _, child := range node.Content {
-			if err := extractIncludes(child, currentStruct, baseDir); err != nil {
+			if err := extractIncludes(child, currentStruct, baseDir, yamlPathPrefix); err != nil {
 				return err
 			}
 		}
@@ -102,18 +124,25 @@ func extractIncludes(node *yaml4.Node, currentStruct any, baseDir string) error 
 		valNode := node.Content[i+1]
 		yamlKey := keyNode.Value
 
+		fullYamlPath := yamlKey
+		if yamlPathPrefix != "" {
+			fullYamlPath = yamlPathPrefix + "." + yamlKey
+		}
+
 		isInclude, customPath := parseIncludeTag(currentStruct, yamlKey)
 
 		if isInclude {
 			filePath := customPath
 			if filePath == "" {
-				filePath = fmt.Sprintf("configs/%s.yaml", yamlKey)
+				filePath = filepath.Join(baseDir, yamlKey+".yaml")
 			}
 
 			fullPath := filePath
 			if !filepath.IsAbs(filePath) {
 				fullPath = filepath.Join(baseDir, filePath)
 			}
+
+			RegisterIncludePath(fullYamlPath, filePath, fullPath)
 
 			subData, err := yaml4.Marshal(valNode)
 			if err != nil {
@@ -135,7 +164,7 @@ func extractIncludes(node *yaml4.Node, currentStruct any, baseDir string) error 
 		} else if valNode.Kind == yaml4.MappingNode {
 			nestedStruct := getNestedStruct(currentStruct, yamlKey)
 			if nestedStruct != nil {
-				if err := extractIncludes(valNode, nestedStruct, baseDir); err != nil {
+				if err := extractIncludes(valNode, nestedStruct, baseDir, fullYamlPath); err != nil {
 					return err
 				}
 			}
@@ -145,7 +174,8 @@ func extractIncludes(node *yaml4.Node, currentStruct any, baseDir string) error 
 	return nil
 }
 
-// parseIncludeTag parses struct tags via reflection to determine if a specific key requires file extraction.
+// parseIncludeTag checks if a struct field has an include directive in its YAML tag.
+// Returns true if the field should be extracted to a separate file, and the custom path if specified.
 func parseIncludeTag(s any, yamlKey string) (ok bool, path string) {
 	v := reflect.Indirect(reflect.ValueOf(s))
 	if v.Kind() != reflect.Struct {
@@ -170,7 +200,8 @@ func parseIncludeTag(s any, yamlKey string) (ok bool, path string) {
 	return false, ""
 }
 
-// getNestedStruct resolves and returns the structural interface value matching a specific YAML key.
+// getNestedStruct returns the nested struct value corresponding to a YAML key.
+// Returns nil if the key does not map to a struct field.
 func getNestedStruct(s interface{}, yamlKey string) interface{} {
 	v := reflect.Indirect(reflect.ValueOf(s))
 	if v.Kind() != reflect.Struct {

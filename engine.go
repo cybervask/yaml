@@ -451,7 +451,7 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 				valStr := v.String()
 				allowedChoices := parseChoiceValues(choiceStr)
 
-				// Определяем режим: whitelist или blacklist
+				// Determine mode: whitelist or blacklist
 				isBlacklist := true
 				for _, c := range allowedChoices {
 					if c != "" && !strings.HasPrefix(c, "!") {
@@ -468,7 +468,6 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 						}
 					}
 				} else {
-					// Whitelist mode: просто проверяем вхождение
 					isValid := false
 					for _, c := range allowedChoices {
 						if valStr == c {
@@ -804,9 +803,9 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 	}
 }
 
-// parseChoiceValues парсит строку вида "val1,'val,with,comma',val2"
-// с поддержкой кавычек для значений, содержащих запятые.
-// Возвращает слайс значений без внешних кавычек.
+// parseChoiceValues parses a string of the form "val1,'val,with,comma',val2"
+// with support for quoted values containing commas.
+// It returns a slice of values with outer quotes removed.
 func parseChoiceValues(input string) []string {
 	var result []string
 	var current strings.Builder
@@ -816,7 +815,6 @@ func parseChoiceValues(input string) []string {
 	for i := 0; i < len(input); i++ {
 		ch := input[i]
 
-		// Handle quote start/end - don't include quotes in output
 		if (ch == '\'' || ch == '"') && !inQuotes {
 			inQuotes = true
 			quoteChar = ch
@@ -828,7 +826,6 @@ func parseChoiceValues(input string) []string {
 			continue
 		}
 
-		// Separator only outside quotes
 		if ch == ',' && !inQuotes {
 			val := strings.TrimSpace(current.String())
 			if val != "" {
@@ -841,7 +838,6 @@ func parseChoiceValues(input string) []string {
 		current.WriteByte(ch)
 	}
 
-	// Add last value
 	val := strings.TrimSpace(current.String())
 	if val != "" {
 		result = append(result, val)

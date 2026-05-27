@@ -626,9 +626,8 @@ func TestDebugChoiceEmpty(t *testing.T) {
 	}
 
 	var cfg Config
-	cfg.Order = "" // явно пустая строка
+	cfg.Order = ""
 
-	// Отладка парсинга тега
 	fieldType := reflect.TypeOf(cfg).Field(0)
 	validateTag, _ := fieldType.Tag.Lookup("validate")
 	t.Logf("validate tag: %q", validateTag)
@@ -652,11 +651,10 @@ func TestDebugChoiceEmpty(t *testing.T) {
 		}())
 	}
 
-	// Запуск валидации
 	err := Validate(&cfg)
 	t.Logf("Validate result: error=%v", err)
 
 	if err == nil {
-		t.Error("EXPECTED error for empty string, got nil")
+		t.Error("expected error for empty string, got nil")
 	}
 }
