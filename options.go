@@ -4,13 +4,6 @@ import (
 	yaml4 "go.yaml.in/yaml/v4"
 )
 
-// Re-exported version configuration presets.
-var (
-	V2 = yaml4.V2
-	V3 = yaml4.V3
-	V4 = yaml4.V4
-)
-
 // Option defines a functional configuration capability that can customize
 // and control YAML loading and dumping pipeline operations.
 type Option = yaml4.Option

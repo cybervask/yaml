@@ -3,3 +3,5 @@ bin/**
 coverage.txt
 *-back
 **/*-back
+dec/**
+files/**
