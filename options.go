@@ -58,6 +58,7 @@ var (
 	WithQuotePreference = yaml4.WithQuotePreference
 )
 
+// Re-exported composite configuration option constructors.
 var (
 	// OptsYAML evaluates a raw configuration properties string block to parse and extract operational configuration options.
 	OptsYAML = yaml4.OptsYAML
@@ -66,6 +67,7 @@ var (
 	Options = yaml4.Options
 )
 
+// Re-exported core document node and interface model types.
 type (
 	// Node models an abstract structural syntax element inside the overall YAML document parsing hierarchy tree.
 	Node = yaml4.Node
@@ -86,6 +88,7 @@ type (
 // Unmarshaler defines the interface protocol implemented by data types that require customized YAML deserialization capabilities.
 type Unmarshaler yaml4.Unmarshaler
 
+// Re-exported document directive and encoding descriptor types.
 type (
 	// VersionDirective describes explicit version specifications contained inside structural document directives blocks.
 	VersionDirective yaml4.VersionDirective
@@ -105,6 +108,7 @@ const (
 	EncodingUTF16BE = yaml4.EncodingUTF16BE
 )
 
+// Re-exported document loading error model types.
 type (
 	// LoadError represents an execution failure encountered during document unpacking operations,
 	// containing file coordinates and detailed diagnostics about the incident location.

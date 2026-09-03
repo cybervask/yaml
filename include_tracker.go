@@ -12,6 +12,8 @@ type includeEntry struct {
 	AbsolutePath string
 }
 
+// includeRegistry caches the global mapping between configuration field paths
+// and their !include file metadata. Access is guarded by includeMu.
 var (
 	includeMu  sync.RWMutex
 	includeMap = make(map[string]includeEntry)

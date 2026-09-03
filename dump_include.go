@@ -152,6 +152,9 @@ func MarshalWithInclude(in any, opts ...DumpOption) ([]byte, error) {
 	return DumpWithInclude(in, opts...)
 }
 
+// collectIncludesRecursive walks the struct hierarchy and gathers every field
+// that was loaded via a !include directive, recording its YAML path, value,
+// and the absolute filesystem path of the source include file.
 func collectIncludesRecursive(v reflect.Value, path string, out *[]includeInfo) {
 	if !v.IsValid() {
 		return
@@ -206,6 +209,8 @@ func collectIncludesRecursive(v reflect.Value, path string, out *[]includeInfo) 
 	}
 }
 
+// buildOutputStruct converts a struct into a generic map hierarchy, replacing
+// tracked include subtrees with !include markers pointing to their source files.
 func buildOutputStruct(v reflect.Value, path string, cfg *DumpOpts) any {
 	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {

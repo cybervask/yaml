@@ -17,7 +17,7 @@ You can combine multiple validation rules inside the `validate` tag using a comm
 | Rule / Feature            | Syntax Example                     | Description                                                                                                                                | Supported Types                             |
 |:--------------------------|:-----------------------------------|:-------------------------------------------------------------------------------------------------------------------------------------------|:--------------------------------------------|
 | **Environment Injection** | `env:"APP_PORT"`                   | **12-Factor App:** Dynamically injects system environment variables. Takes absolute precedence over YAML and tag defaults.                 | `string`, `bool`, primitive numbers         |
-| **Required Field**        | `validate:"not_empty"`             | Ensures the field is assigned a non-zero value. Mutually exclusive with the `default` tag.                                                 | `string`, `struct`, `slice`, `map`, numbers |
+| **Required Field**        | `validate:"required"`              | Ensures the field is assigned a non-zero value. Mutually exclusive with the `default` tag. `not_empty` is a legacy alias (kept for backward compatibility, planned for deprecation). | `string`, `struct`, `slice`, `map`, numbers |
 | **Conditional Required**  | `validate:"required_if=role:!srv"` | **Cross-field Validation:** Field becomes required based on another field value. Supports negation `!` and macros (`:empty`/`:not_empty`). | `string`, numbers, `bool` etc.              |
 | **Whitelist Choices**     | `validate:"choice=dev,prod"`       | **Whitelist mode:** The string value must perfectly match one of the comma-separated tokens. Supports slice elements recursively.          | `string`, `[]string`                        |
 | **Blacklist Choices**     | `validate:"choice=!red,!black"`    | **Blacklist mode:** Allows any string value except for the specific exclusion tokens prefixed with `!`.                                    | `string`, `[]string`                        |
@@ -26,10 +26,12 @@ You can combine multiple validation rules inside the `validate` tag using a comm
 | **String Length (Runes)** | `validate:"minlen=3,maxlen=20"`    | Enforces minimum and maximum limits on string length. Professionally counts **Unicode Runes** instead of raw bytes.                        | `string`                                    |
 | **Collection Capacity**   | `validate:"mincount=1,maxcount=5`  | Enforces minimum and maximum elements count inside dynamic collections.                                                                    | `slice`, `map`                              |
 | **Network Formats**       | `validate:"format=ipv4"`           | Validates specific IP networks layout. Supports `format=ip`, `format=ipv4`, and `format=ipv6`. Mutually exclusive with `endpoint`.         | `string`                                    |
+| **Hex Encoding**          | `validate:"format=hex"`            | Validates hexadecimal strings: decodable via `hex.DecodeString` with an even number of digits. Odd lengths and non-hex characters are rejected. | `string`                                    |
 | **Unique Identity**       | `validate:"format=uuid"`           | Formats verification using strict RFC-compliant `google/uuid` sub-parsing layer routines.                                                  | `string`                                    |
 | **Regular Expression**    | `validate:"regexp=^[a-z]{2,4}$"`   | Validates string layout matching a regular expression pattern. Safe against embedded commas.                                               | `string`, `[]string`                        |
 | **Endpoint**              | `validate:"endpoint"`              | Enforces standard network endpoints (`host:port`). Natively checks **IPv6** syntax and port bounds (1-65535).                              | `string`                                    |
 | **Enforced URL**          | `validate:"url"`                   | Checks Uniform Resource Identifiers. Strictly requires an explicit protocol scheme separator (e.g., `http://`, `grpc://`).                 | `string`                                    |
+| **Per-Instance Path Rules** | `validate:"min_len.min=0,max_len.max=64"` | **Shared nested types:** Applies a rule to a nested field of this specific instance via the `<yaml_path>.<rule>=<value>` syntax; each parent instance gets its own bounds. Dangling paths are reported as errors. | nested struct fields |
 
 ---
 
@@ -143,3 +145,32 @@ field api_url: is required when field env=prod
 field timeout: value 500ms < min 1s
 field server.allowed_ips: collection size 0 is less than mincount 1
 ```
+
+---
+
+## Examples
+
+The `examples/` directory contains runnable programs covering every validation rule and feature. Run any of them from the repository root:
+
+```bash
+go run ./examples/01_choice
+```
+
+| Example | Demonstrates |
+|---------|--------------|
+| `01_choice` | Whitelist/blacklist `choice` rules, quoted values containing commas, valid and invalid profiles |
+| `02_help` | Automated CLI help generation via `yaml.Help()` from `description` tags |
+| `03_min-max` | Inclusive `min`/`max` bounds for numbers and `time.Duration`, valid and out-of-range profiles |
+| `04_mincount-maxcount` | Collection size bounds for slices and maps, valid and capacity-violating profiles |
+| `05_required_if` | Cross-field `required_if` (incl. negation) with `endpoint` and `url` rules |
+| `06_with-include` | `!include` directive resolution during load, including a missing-file failure |
+| `07_with_env_overwrite` | Environment variable injection overriding tag defaults, incl. a whitelist violation |
+| `08_write-to-includes` | Atomic write-back preserving `!include` structure (`DumpWithInclude`) |
+| `10_test` | Include path tracker (`FindIncludeFile`) plus the `DumpWithInclude` rejection path for scalars |
+| `11_not_empty-required` | `required` rule and its legacy `not_empty` alias (kept for backward compatibility) |
+| `12_gt-lt` | Strict `gt`/`lt` bounds for int, float and `time.Duration` |
+| `13_minlen-maxlen` | String length limits counted in Unicode runes |
+| `14_format` | `format=ip`, `format=ipv4`, `format=ipv6`, `format=uuid`, `format=hex` |
+| `15_regexp` | `regexp` rule: plain patterns, embedded commas, slice elements |
+| `16_validation-errors` | Aggregated report of multiple violations across different rules |
+| `17_embed` | Per-instance path rules on a shared nested type (`min_len.min=0` vs `min_len.min=4`) |

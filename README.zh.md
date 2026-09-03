@@ -17,7 +17,7 @@
 | 特性与规则标识       | 语法示例                               | 说明                                                                           | 支持的类型                                    |
 |:--------------|:-----------------------------------|:-----------------------------------------------------------------------------|:-----------------------------------------|
 | **环境变量注入**    | `env:"APP_PORT"`                   | **12-Factor App:** 动态注入和读取 OS 变量。其优先级绝对高于 YAML 和 `default` 标记。               | `string`, `bool`, 基础数值                   |
-| **必填字段**      | `validate:"not_empty"`             | 确保字段被分配了一个非零值。与 `default` 标签互斥。                                              | `string`, `struct`, `slice`, `map`, 数字类型 |
+| **必填字段**      | `validate:"required"`             | 确保字段被分配了一个非零值。与 `default` 标签互斥。`not_empty` 是其旧版别名（为向后兼容而保留，计划弃用）。                | `string`, `struct`, `slice`, `map`, 数字类型 |
 | **条件关联必填**    | `validate:"required_if=role:!srv"` | **跨字段联合校验：** 依赖另一个字段的值决定当前字段是否必填。支持取反操作符 `!` 以及宏定义。                          | `string`, 数字, `bool`, 指针类型等              |
 | **枚举白名单**     | `validate:"choice=dev,prod"`       | **白名单模式：** 字符串值必须与逗号分隔的标识符完全匹配。递归支持切片元素。                                     | `string`, `[]string`                     |
 | **枚举黑名单**     | `validate:"choice=!red,!black"`    | **黑名单模式：** 允许任何字符串值，开头的 `!` 标识符除外。递归支持切片元素。                                  | `string`, `[]string`                     |
@@ -26,10 +26,12 @@
 | **字符串长度(字符)** | `validate:"minlen=3,maxlen=20"`    | 强制限制字符串的长度边界。升级为计算 **Unicode 字符数 (Runes)**，而非原生字节数，完美支持多语言。                  | `string`                                 |
 | **容器容量限制**    | `validate:"mincount=1,maxcount=5`  | 强制限制动态切片（Slice）或映射（Map）中允许的最小和最大元素数量。                                        | `slice`, `map`                           |
 | **网络地址格式**    | `validate:"format=ipv4"`           | 校验特定的 IP 网络布局。支持 `format=ip`, `format=ipv4` 和 `format=ipv6`。与 `endpoint` 互斥。 | `string`                                 |
+| **十六进制编码**     | `validate:"format=hex"`            | 校验十六进制字符串：可通过 `hex.DecodeString` 解码且字符数为偶数。奇数长度与非十六进制字符会被拒绝。             | `string`                                 |
 | **UUID 唯一标识** | `validate:"format=uuid"`           | 基于成熟稳定的 `google/uuid` 核心依赖包，强制执行符合 RFC 标准的严格 UUID 格式校验。                      | `string`                                 |
 | **正则表达式**     | `validate:"regexp=^[a-z]{2,4}$"`   | 验证字符串布局是否符合正则表达式。防止由于包含逗号而发生解析断裂。                                            | `string`, `[]string`                     |
 | **网络终结点**     | `validate:"endpoint"`              | 强制执行标准网络终结点 (`host:port`)。原生检查 **IPv6** 语法和端口边界（1-65535）。                    | `string`                                 |
 | **严格的 URL**   | `validate:"url"`                   | 校验统一资源定位符。严格要求显式的协议方案分隔符（如 `http://`, `grpc://`）。                            | `string`                                 |
+| **实例级路径规则** | `validate:"min_len.min=0,max_len.max=64"` | **共享嵌套类型：** 通过 `<yaml路径>.<规则>=<值>` 语法将规则应用于该实例的嵌套字段；每个父实例拥有自己的边界。悬空路径会报告为错误。 | 嵌套 struct 字段 |
 
 ---
 
@@ -144,3 +146,32 @@ field api_url: is required when field env=prod
 field timeout: value 500ms < min 1s
 field server.allowed_ips: collection size 0 is less than mincount 1
 ```
+
+---
+
+## 示例
+
+`examples/` 目录包含覆盖所有验证规则和功能特性的可运行程序。请在仓库根目录下运行：
+
+```bash
+go run ./examples/01_choice
+```
+
+| 示例 | 演示内容 |
+|------|----------|
+| `01_choice` | `choice` 白名单/黑名单模式，含带逗号的引号值，有效与无效配置 |
+| `02_help` | 通过 `yaml.Help()` 从 `description` 标签自动生成 CLI 帮助文档 |
+| `03_min-max` | 数字与 `time.Duration` 的包含边界 `min`/`max`，有效与越界配置 |
+| `04_mincount-maxcount` | 切片与映射的集合元素数量限制，有效与超限配置 |
+| `05_required_if` | 跨字段 `required_if`（含取反）结合 `endpoint` 与 `url` 规则 |
+| `06_with-include` | 加载时解析 `!include` 指令，含缺失文件错误场景 |
+| `07_with_env_overwrite` | 环境变量注入覆盖标签默认值，含白名单违规场景 |
+| `08_write-to-includes` | 保留 `!include` 结构的原子化回写（`DumpWithInclude`） |
+| `10_test` | 包含路径跟踪器（`FindIncludeFile`）及 `DumpWithInclude` 对标量输入的拒绝 |
+| `11_not_empty-required` | `required` 规则及其旧版别名 `not_empty`（为向后兼容而保留） |
+| `12_gt-lt` | int、float 与 `time.Duration` 的严格边界 `gt`/`lt` |
+| `13_minlen-maxlen` | 以 Unicode 字符数计算的字符串长度限制 |
+| `14_format` | `format=ip`、`format=ipv4`、`format=ipv6`、`format=uuid`、`format=hex` |
+| `15_regexp` | `regexp` 规则：普通模式、内嵌逗号、切片元素 |
+| `16_validation-errors` | 跨多种规则的多个违规的聚合报告 |
+| `17_embed` | 共享嵌套类型上的实例级路径规则（`min_len.min=0` 与 `min_len.min=4`） |
