@@ -77,7 +77,7 @@ func TestValidate_Errors(t *testing.T) {
 			modify: func(c *TestConfig) {
 				c.RequiredItem = ""
 			},
-			errSubstr: "is empty, but required by 'not_empty'",
+			errSubstr: "is empty, but required",
 		},
 		{
 			name: "whitelist choice violation",
@@ -434,15 +434,33 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 		V4    string `yaml:"v4" validate:"format=ipv4"`
 		V6    string `yaml:"v6" validate:"format=ipv6"`
 		ID    string `yaml:"id" validate:"format=uuid"`
+		Hex   string `yaml:"hex" validate:"format=hex"`
 	}
-	fc := FormatConfig{AnyIP: "1.2.3.4", V4: "127.0.0.1", V6: "::1", ID: "123e4567-e89b-12d3-a456-426614174000"}
+	fc := FormatConfig{AnyIP: "1.2.3.4", V4: "127.0.0.1", V6: "::1", ID: "123e4567-e89b-12d3-a456-426614174000", Hex: "deadBEEF"}
 	if err := Validate(&fc); err != nil {
-		t.Fatalf("valid networking formats and UUID strings must not produce errors, got: %v", err)
+		t.Fatalf("valid networking formats, UUID strings and hex values must not produce errors, got: %v", err)
+	}
+
+	// An empty string is a valid (zero-length) hex value.
+	fc.Hex = ""
+	if err := Validate(&fc); err != nil {
+		t.Fatalf("empty hex value must pass, got: %v", err)
 	}
 
 	fc.V4 = "256.0.0.1" // Out-of-bounds IPv4 address layout.
 	if err := Validate(&fc); err == nil || !strings.Contains(err.Error(), "is not a valid IPv4 address") {
 		t.Errorf("expected strict IPv4 layout evaluation failure, got: %v", err)
+	}
+
+	fc.V4 = "127.0.0.1"
+	fc.Hex = "abc" // Odd number of digits.
+	if err := Validate(&fc); err == nil || !strings.Contains(err.Error(), "odd number of digits") {
+		t.Errorf("expected odd-length hex failure, got: %v", err)
+	}
+
+	fc.Hex = "xyz0" // Non-hex characters with even length.
+	if err := Validate(&fc); err == nil || !strings.Contains(err.Error(), "is not valid hex") {
+		t.Errorf("expected invalid hex characters failure, got: %v", err)
 	}
 
 	// 4. Verify conditional cross-field checking constraints (required_if) with negation formatting.
@@ -497,6 +515,8 @@ func TestValidate_ExtendedFeatures(t *testing.T) {
 	}
 }
 
+// TestChoiceWithCommas verifies that the choice rule correctly handles whitelist
+// tokens that embed literal commas inside quoted segments.
 func TestChoiceWithCommas(t *testing.T) {
 	type Config struct {
 		Order string `yaml:"order" validate:"choice='allow,deny','deny,allow'"`
@@ -526,6 +546,8 @@ func TestChoiceWithCommas(t *testing.T) {
 	}
 }
 
+// TestChoiceWithQuotesAndSpaces checks that quoted choice tokens preserve
+// inner spaces during parsing and comparison.
 func TestChoiceWithQuotesAndSpaces(t *testing.T) {
 	type Config struct {
 		Mode string `yaml:"mode" validate:"choice='read,write', 'read-only', 'write-only'"`
@@ -545,6 +567,8 @@ func TestChoiceWithQuotesAndSpaces(t *testing.T) {
 	}
 }
 
+// TestChoiceBlacklistWithCommas verifies that blacklist (!-prefixed) choice
+// tokens containing embedded commas are correctly forbidden.
 func TestChoiceBlacklistWithCommas(t *testing.T) {
 	type Config struct {
 		Action string `yaml:"action" validate:"choice='!allow,deny','!deny,allow'"`
@@ -564,6 +588,8 @@ func TestChoiceBlacklistWithCommas(t *testing.T) {
 	}
 }
 
+// TestValidateTagParsing validates the low-level validate tag tokenizer against
+// plain, quoted, and mixed rule combinations.
 func TestValidateTagParsing(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -620,6 +646,8 @@ func TestValidateTagParsing(t *testing.T) {
 	}
 }
 
+// TestDebugChoiceEmpty reproduces the empty-value choice edge case to keep the
+// parser behavior observable under the debugger.
 func TestDebugChoiceEmpty(t *testing.T) {
 	type Config struct {
 		Order string `yaml:"order" validate:"choice='allow,deny','deny,allow'"`

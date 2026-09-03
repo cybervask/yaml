@@ -1,4 +1,5 @@
-// Package main provides example
+// Package main demonstrates atomic write-back with !include preservation:
+// modified subtree values are returned to their source include files.
 package main
 
 import (
@@ -9,6 +10,7 @@ import (
 	"github.com/cybervask/yaml"
 )
 
+// Logging describes the application logging pipeline settings.
 type Logging struct {
 	Level  string `yaml:"level" default:"info" description:"Log level"`
 	Colors bool   `yaml:"colors" description:"Colors"`
@@ -16,37 +18,44 @@ type Logging struct {
 	Stack  bool   `yaml:"stack" description:"Display stack information"`
 }
 
+// Config is the root configuration model for the application.
 type Config struct {
 	Server struct {
 		Logging Logging `yaml:"logging"`
-	} `yaml:"server"`
+	} `yaml:"server" description:"Exposed services"`
 }
 
 func main() {
-	var cfg Config
-
-	// 1. Load configuration with include path tracking
+	// 1. Load the configuration and track where the !include subtrees came from.
 	yaml.ResetIncludeTracker()
-	includeFile := "./examples/write-to-includes/config.yaml"
+	includeFile := "./examples/08_write-to-includes/config.yaml"
+
+	var cfg Config
 	if err := yaml.UnmarshalFile(includeFile, &cfg); err != nil {
 		log.Fatal(err)
 	}
 
-	// 2. Check the include path for a specific field
+	// 2. Check the tracked include path of a specific field.
 	if p := yaml.FindIncludeFile("server.logging"); p != "" {
-		fmt.Printf("✅ server.logging: include path: %s\n", p)
+		fmt.Printf("OK server.logging: include path: %s\n", p)
 	} else {
-		fmt.Println("ℹ️ Logging is inline (not from !include)")
+		fmt.Println("INFO: Logging is inline (not from !include)")
 	}
 
+	// 3. Modify the loaded subtree and dump the whole configuration back.
 	cfg.Server.Logging.Level = "debug"
 
-	// 3. Atomic dump preserving include structure
 	out, err := yaml.DumpWithInclude(&cfg, yaml.WithRelativeIncludes("."))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// out contains YAML with !include directives, and modified data is written to files atomically
-	_ = os.WriteFile("./examples/write-to-includes/config.yaml", out, 0644)
+	// 4. The main document keeps the !include directive; the modified data is
+	// written to the source files atomically by DumpWithInclude itself.
+	if err := os.WriteFile(includeFile, out, 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("write-back completed, config.yaml now contains:")
+	fmt.Println(string(out))
 }

@@ -1,6 +1,8 @@
 package yaml
 
 import (
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -23,12 +25,14 @@ var durationType = reflect.TypeOf(time.Duration(0))
 // execution and take absolute precedence over standard tag defaults.
 //
 // It returns an error if a design conflict is detected where both 'default' and
-// 'not_empty' validate constraints are declared on the same structure field.
+// a requiredness rule ('required' or its legacy alias 'not_empty') are declared
+// on the same structure field.
 func SetDefaults(ptr interface{}) error {
 	v := reflect.ValueOf(ptr)
 	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return nil
 	}
+
 	return setDefaultsValue(v.Elem())
 }
 
@@ -46,8 +50,14 @@ func setDefaultsValue(v reflect.Value) error {
 			validateTag, hasValidate := fieldType.Tag.Lookup("validate")
 			defaultValStr, hasDefault := fieldType.Tag.Lookup("default")
 
-			if hasDefault && hasValidate && strings.Contains(validateTag, "not_empty") {
-				return fmt.Errorf("field %s is invalid: 'default' and 'not_empty' are mutually exclusive", fieldType.Name)
+			if hasDefault && hasValidate {
+				tagRules := parseValidateTag(validateTag)
+				if _, hasRequired := tagRules["required"]; hasRequired {
+					return fmt.Errorf("field %s is invalid: 'default' and 'required' are mutually exclusive", fieldType.Name)
+				}
+				if _, hasNotEmpty := tagRules["not_empty"]; hasNotEmpty {
+					return fmt.Errorf("field %s is invalid: 'default' and 'not_empty' are mutually exclusive", fieldType.Name)
+				}
 			}
 
 			if fieldType.Name == "Value" {
@@ -103,8 +113,9 @@ func setDefaultsValue(v reflect.Value) error {
 				if fieldVal.Type() == durationType {
 					d, err := time.ParseDuration(targetValStr)
 					if err != nil {
-						return fmt.Errorf("invalid duration %q for field %s", targetValStr, fieldType.Name)
+						return fmt.Errorf("invalid duration %q for field %s: %w", targetValStr, fieldType.Name, err)
 					}
+
 					fieldVal.Set(reflect.ValueOf(d))
 					continue
 				}
@@ -112,21 +123,27 @@ func setDefaultsValue(v reflect.Value) error {
 				switch fieldVal.Kind() {
 				case reflect.String:
 					fieldVal.SetString(targetValStr)
+
 				case reflect.Bool:
 					b, err := strconv.ParseBool(targetValStr)
 					if err == nil {
 						fieldVal.SetBool(b)
 					}
+
 				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 					n, err := strconv.ParseInt(targetValStr, 10, 64)
 					if err == nil {
 						fieldVal.SetInt(n)
 					}
+
 				case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 					n, err := strconv.ParseUint(targetValStr, 10, 64)
 					if err == nil {
 						fieldVal.SetUint(n)
 					}
+
+				default:
+					// Unsupported kind for default/env injection: leave the field untouched.
 				}
 			}
 		}
@@ -176,19 +193,94 @@ func setDefaultsValue(v reflect.Value) error {
 	return nil
 }
 
+// pathRule captures a nested-target validation rule declared on a parent field.
+// Target holds the dot-separated relative path to the nested field (e.g.
+// "min_len" or "limits.min_len") and Rules holds the validators that apply to
+// the field living at that path.
+type pathRule struct {
+	Target string
+	Rules  map[string]string
+}
+
+// parsePathToken attempts to parse a path-style rule token of the form
+// "path.rule=value" (or the flag form "path.required") where the final dot
+// segment is a known rule and the leading segments form the nested target path.
+// It returns false when the token does not match the path syntax.
+func parsePathToken(token string) (target, rule, value string, ok bool) {
+	// Locate the rule segment: the last dot-separated chunk must be a known rule name.
+	rest := token
+	for {
+		idx := strings.LastIndex(rest, ".")
+		if idx < 0 {
+			return "", "", "", false
+		}
+
+		last := rest[idx+1:]
+		name := last
+		hasParam := false
+
+		if cutName, cutValue, isCut := strings.Cut(last, "="); isCut {
+			name = cutName
+			value = cutValue
+			hasParam = true
+		}
+
+		if !isKnownRule(name, hasParam) {
+			// Try a shorter path prefix: the rule segment may itself contain dots
+			// only inside its value (e.g. regexp patterns), so back off one segment.
+			value = ""
+			rest = rest[:idx]
+			continue
+		}
+
+		target = strings.TrimSuffix(rest[:idx], ".")
+		rule = name
+		if target == "" {
+			return "", "", "", false
+		}
+
+		return target, rule, value, true
+	}
+}
+
+// isKnownRule reports whether name matches a known rule with the given
+// parameterization mode (parameterized rules end with "=" in allRules).
+func isKnownRule(name string, param bool) bool {
+	for _, rule := range allRules {
+		trimmed := strings.TrimSuffix(rule, "=")
+		if trimmed != name {
+			continue
+		}
+
+		_, isParamRule := parameterizedRules[trimmed]
+
+		return isParamRule == param
+	}
+
+	return false
+}
+
+// allRules lists every rule token recognized by the validate tag parser
+// (parameterized rules carry a trailing "=").
+var allRules = []string{
+	"mincount=", "maxcount=", "endpoint", "not_empty", "required",
+	"regexp=", "choice=", "minlen=", "maxlen=", "format=",
+	"min=", "max=", "url", "lt=", "gt=", "required_if=",
+}
+
+// parameterizedRules marks the rules that require an "=value" argument.
+var parameterizedRules = map[string]bool{
+	"mincount": true, "maxcount": true, "regexp": true, "choice": true,
+	"minlen": true, "maxlen": true, "format": true, "min": true,
+	"max": true, "lt": true, "gt": true, "required_if": true,
+}
+
 // parseValidateTag tokenizes the validation tag string into separate rule mappings.
 // It isolates parameters even if they contain punctuation like commas (e.g. inside regex patterns or quoted values).
 func parseValidateTag(tag string) map[string]string {
 	rules := make(map[string]string)
 	if tag == "" {
 		return rules
-	}
-
-	// Known rules (with = for parameterized, without for flags)
-	allRules := []string{
-		"mincount=", "maxcount=", "endpoint", "not_empty",
-		"regexp=", "choice=", "minlen=", "maxlen=", "format=",
-		"min=", "max=", "url", "lt=", "gt=", "required_if=",
 	}
 
 	// isRuleStart checks if position idx starts with a known rule
@@ -198,6 +290,7 @@ func parseValidateTag(tag string) map[string]string {
 				return true
 			}
 		}
+
 		return false
 	}
 
@@ -245,6 +338,30 @@ func parseValidateTag(tag string) map[string]string {
 		}
 
 		if foundRule == "" {
+			// Try the path-rule syntax: <nested.path>.<rule>=<value>
+			tokenEnd := i
+			for tokenEnd < n && tag[tokenEnd] != ',' {
+				tokenEnd++
+			}
+
+			if target, rule, value, ok := parsePathToken(tag[i:tokenEnd]); ok {
+				entry := rule
+				if value != "" {
+					entry += "=" + value
+				}
+
+				key := "path:" + target
+				if existing, hasKey := rules[key]; hasKey && existing != "" {
+					rules[key] = existing + "," + entry
+				} else {
+					rules[key] = entry
+				}
+
+				i = tokenEnd
+
+				continue
+			}
+
 			// Unknown rule, skip to next comma
 			for i < n && tag[i] != ',' {
 				i++
@@ -252,6 +369,7 @@ func parseValidateTag(tag string) map[string]string {
 			if i < n {
 				i++
 			}
+
 			continue
 		}
 
@@ -322,11 +440,92 @@ func Validate(ptr interface{}) error {
 			if i > 0 {
 				sb.WriteString("\n")
 			}
+
 			sb.WriteString(err.Error())
 		}
+
 		return fmt.Errorf("%s", sb.String())
 	}
+
 	return nil
+}
+
+// extractPathRules pulls every "path:<target>" entry out of a parsed rule map
+// and re-tokenizes the collected rule list through parseValidateTag. The path
+// entries are removed from the map so that they are never mistaken for rules
+// targeting the owner field itself.
+func extractPathRules(rules map[string]string) []pathRule {
+	var extracted []pathRule
+
+	for key, value := range rules {
+		if !strings.HasPrefix(key, "path:") {
+			continue
+		}
+
+		delete(rules, key)
+		extracted = append(extracted, pathRule{
+			Target: strings.TrimPrefix(key, "path:"),
+			Rules:  parseValidateTag(value),
+		})
+	}
+
+	return extracted
+}
+
+// resolvePathTarget walks the dot-separated target path from the owner value
+// and returns the referenced field value. Struct segments are matched by yaml
+// tag name or Go field name, and pointers are dereferenced along the way.
+func resolvePathTarget(owner reflect.Value, target string) (reflect.Value, bool) {
+	current := owner
+
+	if current.Kind() == reflect.Pointer {
+		if current.IsNil() {
+			return reflect.Value{}, false
+		}
+
+		current = current.Elem()
+	}
+
+	for _, segment := range strings.Split(target, ".") {
+		if current.Kind() != reflect.Struct {
+			return reflect.Value{}, false
+		}
+
+		next := resolveStructField(current, segment)
+		if !next.IsValid() {
+			return reflect.Value{}, false
+		}
+
+		current = next
+	}
+
+	return current, true
+}
+
+// resolveStructField locates a struct field by yaml tag name (first tag
+// component) or by its Go field name and returns its value.
+func resolveStructField(v reflect.Value, segment string) reflect.Value {
+	t := v.Type()
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+
+		yamlName := field.Tag.Get("yaml")
+		if yamlName != "" {
+			yamlName = strings.Split(yamlName, ",")[0]
+		}
+
+		if yamlName == segment || field.Name == segment {
+			fieldValue := v.Field(i)
+			if fieldValue.Kind() == reflect.Pointer && !fieldValue.IsNil() {
+				return fieldValue.Elem()
+			}
+
+			return fieldValue
+		}
+	}
+
+	return reflect.Value{}
 }
 
 // validateValue performs automated constraint checks down the configuration node hierarchy tree.
@@ -342,8 +541,11 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 
 	if len(rules) > 0 {
 		// 1.1. Basic check for unconditional field requirement
-		if _, hasNotEmpty := rules["not_empty"]; hasNotEmpty && v.IsZero() {
-			*errs = append(*errs, fmt.Errorf("field %s: is empty, but required by 'not_empty'", currentPath))
+		_, hasNotEmpty := rules["not_empty"]
+		_, hasRequired := rules["required"]
+		isRequired := hasNotEmpty || hasRequired
+		if isRequired && v.IsZero() {
+			*errs = append(*errs, fmt.Errorf("field %s: is empty, but required", currentPath))
 		}
 
 		// 1.2. Cross-field conditional validation execution (required_if) positioned at top tier level
@@ -529,24 +731,41 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 
 			if hasFormat && v.Kind() == reflect.String {
 				valStr := v.String()
+
 				switch formatStr {
 				case "ip":
 					if ip := net.ParseIP(valStr); ip == nil {
 						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IP address", currentPath, valStr))
 					}
+
 				case "ipv4":
 					if ip := net.ParseIP(valStr); ip == nil || ip.To4() == nil {
 						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IPv4 address", currentPath, valStr))
 					}
+
 				case "ipv6":
 					if ip := net.ParseIP(valStr); ip == nil || ip.To4() != nil {
 						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid IPv6 address", currentPath, valStr))
 					}
+
 				case "uuid":
 					matched, _ := regexp.MatchString(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`, valStr)
 					if !matched {
 						*errs = append(*errs, fmt.Errorf("field %s: value %q is not a valid UUID", currentPath, valStr))
 					}
+
+				case "hex":
+					if _, err := hex.DecodeString(valStr); err != nil {
+						if errors.Is(err, hex.ErrLength) {
+							*errs = append(*errs, fmt.Errorf("field %s: value %q is not valid hex: odd number of digits (%d)", currentPath, valStr, len(valStr)))
+						} else {
+							*errs = append(*errs, fmt.Errorf("field %s: value %q is not valid hex: %w", currentPath, valStr, err))
+						}
+					}
+
+				default:
+					// Unknown format token: report a configuration mistake instead of silently skipping.
+					*errs = append(*errs, fmt.Errorf("field %s: unknown format %q (expected ip, ipv4, ipv6, uuid or hex)", currentPath, formatStr))
 				}
 			}
 
@@ -683,8 +902,9 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 						parseUintLimit := func(str string) (uint64, error) {
 							limit, err := strconv.ParseInt(str, 10, 64)
 							if err != nil || limit < 0 {
-								return 0, fmt.Errorf("invalid uint limit %s", str)
+								return 0, fmt.Errorf("invalid uint limit %s: %w", str, err)
 							}
+
 							return uint64(limit), nil
 						}
 						var minVal, maxVal, ltVal, gtVal uint64
@@ -756,6 +976,9 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 								*errs = append(*errs, fmt.Errorf("field %s: value %f must be > %s", currentPath, val, gtStr))
 							}
 						}
+
+					default:
+						// Unsupported numeric kind for boundary validation: skip silently.
 					}
 				}
 			}
@@ -786,10 +1009,29 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 				validateValue(fieldVal, currentPath, rules, root, errs)
 				continue
 			}
+
 			var fieldRules map[string]string
 			if validateTag, hasValidate := fieldType.Tag.Lookup("validate"); hasValidate {
 				fieldRules = parseValidateTag(validateTag)
 			}
+
+			// Path-style rules ("min_len.min=0") apply to nested fields of this
+			// instance instead of the field itself; resolve each target and
+			// validate it with the full dot path so errors stay readable.
+			if pathRules := extractPathRules(fieldRules); len(pathRules) > 0 {
+				for _, pr := range pathRules {
+					target, found := resolvePathTarget(fieldVal, pr.Target)
+					if !found {
+						*errs = append(*errs, fmt.Errorf("field %s: path rule %q references a non-existent field", nextPath, pr.Target))
+
+						continue
+					}
+
+					targetPath := nextPath + "." + pr.Target
+					validateValue(target, targetPath, pr.Rules, root, errs)
+				}
+			}
+
 			validateValue(fieldVal, nextPath, fieldRules, root, errs)
 		}
 	case reflect.Slice:
@@ -800,6 +1042,9 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 		for _, key := range v.MapKeys() {
 			validateValue(v.MapIndex(key), fmt.Sprintf("%s[%v]", currentPath, key.Interface()), rules, root, errs)
 		}
+
+	default:
+		// Scalar or unsupported kind: nothing to recurse into.
 	}
 }
 
