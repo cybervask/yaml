@@ -1,12 +1,11 @@
 package yaml
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	yaml4 "go.yaml.in/yaml/v4"
 )
 
 // writeTestFile creates a file with the given content inside a test directory.
@@ -69,7 +68,9 @@ func TestLoadWithIncludeMissingFile(t *testing.T) {
 	}
 }
 
-// TestLoadWithIncludeEmptyFile verifies that empty include files are rejected.
+// TestLoadWithIncludeEmptyFile verifies that an include file holding no YAML
+// documents is rejected, with a message that names the actual problem: the
+// file may well be non-empty and still contain no documents.
 func TestLoadWithIncludeEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "empty.yaml", "")
@@ -83,6 +84,87 @@ func TestLoadWithIncludeEmptyFile(t *testing.T) {
 	err := LoadFile(main, &Config{})
 	if err == nil {
 		t.Fatal("expected empty include error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "contains no documents") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestLoadInclude_CommentsOnlyHasNoDocuments verifies that an include file
+// made only of comments and blanks is rejected as well: such a file is not
+// empty, it simply holds no YAML documents, so the message must say so.
+func TestLoadInclude_CommentsOnlyHasNoDocuments(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "comments.yaml", "# only a comment\n\n")
+
+	type Config struct {
+		Level string `yaml:"level" description:"Log level"`
+	}
+
+	main := writeTestFile(t, dir, "config.yaml", "level: !include comments.yaml\n")
+
+	err := LoadFile(main, &Config{})
+	if err == nil {
+		t.Fatal("expected no-documents error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "contains no documents") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestLoadInclude_MultiDocRejected verifies that an include file holding
+// several YAML documents is rejected as a configuration error: yaml4 keeps
+// only the first document in a Node, so the pre-fix code silently dropped
+// every document after the first one.
+func TestLoadInclude_MultiDocRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "logging.yaml", "level: info\n---\nlevel: debug\n")
+
+	type Logging struct {
+		Level string `yaml:"level" default:"info" description:"Log level"`
+	}
+	type Config struct {
+		Logging Logging `yaml:"logging" description:"Logging settings"`
+	}
+
+	main := writeTestFile(t, dir, "config.yaml", "logging: !include logging.yaml\n")
+
+	var cfg Config
+	err := LoadFile(main, &cfg)
+	if err == nil {
+		t.Fatal("expected multi-document include error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "multiple documents") {
+		t.Fatalf("unexpected error text: %v", err)
+	}
+}
+
+// TestLoadInclude_SingleDocStillWorks guards the streaming rework of the
+// include-file reader: a single-document include must keep loading
+// exactly as before.
+func TestLoadInclude_SingleDocStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "logging.yaml", "level: debug\n")
+
+	type Logging struct {
+		Level string `yaml:"level" default:"info" description:"Log level"`
+	}
+	type Config struct {
+		Logging Logging `yaml:"logging" description:"Logging settings"`
+	}
+
+	main := writeTestFile(t, dir, "config.yaml", "logging: !include logging.yaml\n")
+
+	var cfg Config
+	if err := LoadFile(main, &cfg); err != nil {
+		t.Fatalf("expected valid load, got error: %v", err)
+	}
+
+	if cfg.Logging.Level != "debug" {
+		t.Errorf("expected included value, got %+v", cfg.Logging)
 	}
 }
 
@@ -118,61 +200,6 @@ func TestLoadWithNestedInclude(t *testing.T) {
 	}
 }
 
-// TestHandleIncludeNodeAccepted verifies the exported include hook: a node
-// tagged !include is decoded from the referenced file.
-func TestHandleIncludeNodeAccepted(t *testing.T) {
-	dir := t.TempDir()
-	writeTestFile(t, dir, "data.yaml", "name: demo\n")
-
-	var node yaml4.Node
-	if err := yaml4.Unmarshal([]byte("name: demo\n"), &node); err != nil {
-		t.Fatal(err)
-	}
-
-	node.Tag = "!include"
-	node.Kind = yaml4.ScalarNode
-	node.Value = filepath.Join(dir, "data.yaml")
-
-	var target struct {
-		Name string
-	}
-
-	handled, err := HandleIncludeNode(&node, &target)
-	if err != nil {
-		t.Fatalf("expected successful include handling, got: %v", err)
-	}
-
-	if !handled {
-		t.Error("expected !include node to be handled")
-	}
-
-	if target.Name != "demo" {
-		t.Errorf("expected name=demo, got %q", target.Name)
-	}
-}
-
-// TestHandleIncludeNodeDeclined verifies that plain nodes without the
-// !include tag are declined by the hook without any side effects.
-func TestHandleIncludeNodeDeclined(t *testing.T) {
-	var node yaml4.Node
-	if err := yaml4.Unmarshal([]byte("name: demo\n"), &node); err != nil {
-		t.Fatal(err)
-	}
-
-	var target struct {
-		Name string
-	}
-
-	handled, err := HandleIncludeNode(&node, &target)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-
-	if handled {
-		t.Error("expected plain node to be declined")
-	}
-}
-
 // TestIncludeTrackerRegistry verifies the register/lookup/reset lifecycle
 // of the include tracker.
 func TestIncludeTrackerRegistry(t *testing.T) {
@@ -199,97 +226,210 @@ func TestIncludeTrackerRegistry(t *testing.T) {
 	}
 }
 
-// TestDumpExtractsIncludes verifies that extractIncludes writes tagged include
-// subtrees to external files and replaces them with !include markers in the AST.
-//
-// The AST is built via Unmarshal because yaml.v4 itself rejects the custom
-// "include" tag flag during marshaling, so Dump cannot be used end-to-end
-// with include-tagged fields (see the design note in the final report).
-func TestDumpExtractsIncludes(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	type Logging struct {
-		Level  string `yaml:"level" description:"Log level"`
-		Colors bool   `yaml:"colors" description:"Colors"`
-	}
-
-	type Config struct {
-		Server struct {
-			Logging Logging `yaml:"logging,include"`
-		} `yaml:"server"`
-	}
-
-	cfg := Config{}
-	cfg.Server.Logging = Logging{Level: "trace", Colors: true}
-
-	var node yaml4.Node
-	if err := yaml4.Unmarshal([]byte("server:\n  logging:\n    level: trace\n    colors: true\n"), &node); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := extractIncludes(&node, cfg, ".", ""); err != nil {
-		t.Fatalf("expected extraction to succeed, got: %v", err)
-	}
-
-	data, err := os.ReadFile("logging.yaml")
-	if err != nil {
-		t.Fatalf("expected extracted logging.yaml, got error: %v", err)
-	}
-
-	if !strings.Contains(string(data), "level: trace") {
-		t.Errorf("unexpected extracted content:\n%s", data)
-	}
-}
-
-// TestExtractIncludesCustomPath verifies that the yaml:",include:file.yaml"
-// tag form extracts the subtree into the explicitly specified file.
-func TestExtractIncludesCustomPath(t *testing.T) {
-	t.Chdir(t.TempDir())
-
+// TestDumpIncludeTagFlagRejected verifies the Dump contract after the removal
+// of the dead include-extraction path: Dump is a pure serialization
+// entry point, and a field carrying the include tag flag is rejected by the
+// underlying marshaller with an error instead of being silently processed.
+// Include write-back belongs to DumpWithInclude.
+func TestDumpIncludeTagFlagRejected(t *testing.T) {
 	type Logging struct {
 		Level string `yaml:"level" description:"Log level"`
 	}
-
 	type Config struct {
-		Server struct {
-			Logging Logging `yaml:"logging,include:custom-logging.yaml"`
-		} `yaml:"server"`
+		Logging Logging `yaml:"logging,include"`
 	}
 
-	cfg := Config{}
-	cfg.Server.Logging = Logging{Level: "warn"}
+	cfg := Config{Logging: Logging{Level: "trace"}}
 
-	var node yaml4.Node
-	if err := yaml4.Unmarshal([]byte("server:\n  logging:\n    level: warn\n"), &node); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := extractIncludes(&node, cfg, ".", ""); err != nil {
-		t.Fatalf("expected extraction to succeed, got: %v", err)
-	}
-
-	data, err := os.ReadFile("custom-logging.yaml")
-	if err != nil {
-		t.Fatalf("expected custom-logging.yaml, got error: %v", err)
-	}
-
-	if !strings.Contains(string(data), "level: warn") {
-		t.Errorf("unexpected extracted content:\n%s", data)
-	}
-
-	if p := FindIncludeFile("server.logging"); p != "custom-logging.yaml" {
-		t.Errorf("expected tracked path custom-logging.yaml, got %q", p)
+	out, err := Dump(cfg)
+	if err == nil {
+		t.Fatalf("expected Dump to fail on an include-tagged field, got output:\n%s", out)
 	}
 }
 
-// TestGetNestedStructNonStruct verifies that getNestedStruct and parseIncludeTag
-// safely decline non-struct inputs.
-func TestGetNestedStructNonStruct(t *testing.T) {
-	if nested := getNestedStruct("scalar", "key"); nested != nil {
-		t.Errorf("expected nil for scalar input, got %v", nested)
+// TestLoadWithCyclicInclude verifies that mutually-including files are
+// rejected with a cycle error instead of recursing until memory exhaustion.
+func TestLoadWithCyclicInclude(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "a.yaml", "leaf: !include b.yaml\n")
+	writeTestFile(t, dir, "b.yaml", "leaf: !include a.yaml\n")
+
+	type Config struct {
+		Leaf string `yaml:"leaf" description:"Leaf value"`
 	}
 
-	if ok, path := parseIncludeTag("scalar", "key"); ok || path != "" {
-		t.Errorf("expected decline for scalar input, got ok=%v path=%q", ok, path)
+	main := writeTestFile(t, dir, "config.yaml", "leaf: !include a.yaml\n")
+
+	var cfg Config
+	err := LoadFile(main, &cfg)
+	if err == nil {
+		t.Fatal("expected cyclic include error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "cyclic !include detected") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestLoadWithSelfInclude verifies that a file including itself is rejected.
+func TestLoadWithSelfInclude(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "self.yaml", "leaf: !include self.yaml\n")
+
+	type Config struct {
+		Leaf string `yaml:"leaf" description:"Leaf value"`
+	}
+
+	var cfg Config
+	err := Load([]byte("leaf: !include "+filepath.Join(dir, "self.yaml")+"\n"), &cfg)
+	if err == nil {
+		t.Fatal("expected cyclic include error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "cyclic !include detected") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestResolveIncludes_AbsolutePathNormalization verifies that absolute
+// !include paths are normalized with filepath.Clean before they become
+// cycle-detection keys: the same file reached through differently spelled
+// absolute paths (/d/a.yaml vs /d/./a.yaml) must count as one include.
+//
+// A single self-include is not enough to expose the pre-fix gap: any fixed
+// self-spelling repeats verbatim on the second lap, so the cycle is detected
+// within a few levels even without normalization. Instead, a ring of
+// maxIncludeDepth files is built where the i-th file is included through a
+// spelling with i redundant "./" elements — every spelling is unique, so the
+// unnormalized chain keys never collide and the ring is stopped only by the
+// depth guard ("maximum !include depth 32 exceeded"). With normalization all
+// spellings collapse to the plain file name and the ring is reported as a
+// cycle ("cyclic !include detected").
+func TestResolveIncludes_AbsolutePathNormalization(t *testing.T) {
+	ResetIncludeTracker()
+	t.Cleanup(ResetIncludeTracker)
+
+	dir := t.TempDir()
+
+	// f_i (i >= 1) includes f_{i+1} through dir + "/" + (i+1)×"./" + f_{i+1}.yaml;
+	// f_{maxIncludeDepth-1} closes the ring back to f0 with maxIncludeDepth
+	// redundant "./" elements — a spelling unique within the first lap.
+	// filepath.Join cleans its arguments, so the unclean spellings are built
+	// by string concatenation to keep the "./" elements intact.
+	for i := 0; i < maxIncludeDepth; i++ {
+		next := (i + 1) % maxIncludeDepth
+		content := "leaf: !include " + dir + "/" + strings.Repeat("./", i+1) + fmt.Sprintf("f%d.yaml", next) + "\n"
+		writeTestFile(t, dir, fmt.Sprintf("f%d.yaml", i), content)
+	}
+
+	main := writeTestFile(t, dir, "config.yaml", "leaf: !include "+filepath.Join(dir, "f0.yaml")+"\n")
+
+	type Config struct {
+		Leaf string `yaml:"leaf" description:"Leaf value"`
+	}
+
+	var cfg Config
+	err := LoadFile(main, &cfg)
+	if err == nil {
+		t.Fatal("expected cyclic include error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "cyclic !include detected") {
+		t.Fatalf("expected cyclic error for differently-spelled absolute paths, got: %v", err)
+	}
+}
+
+// TestResolveIncludes_TrackerRecordsCleanedPath verifies that the include
+// tracker holds the normalized (filepath.Clean) absolute path even when the
+// first registration of a field went through an unclean spelling:
+// FindIncludeFileAbs must return the cleaned path for write-back.
+func TestResolveIncludes_TrackerRecordsCleanedPath(t *testing.T) {
+	ResetIncludeTracker()
+	t.Cleanup(ResetIncludeTracker)
+
+	dir := t.TempDir()
+
+	// filepath.Join cleans its arguments, so the unclean spelling is built by
+	// string concatenation to keep the "/./" element intact.
+	unclean := dir + "/./a.yaml"
+	clean := filepath.Join(dir, "a.yaml")
+
+	writeTestFile(t, dir, "a.yaml", "deep\n")
+	main := writeTestFile(t, dir, "config.yaml", "leaf: !include "+unclean+"\n")
+
+	type Config struct {
+		Leaf string `yaml:"leaf" description:"Leaf value"`
+	}
+
+	var cfg Config
+	if err := LoadFile(main, &cfg); err != nil {
+		t.Fatalf("expected valid load, got error: %v", err)
+	}
+
+	if cfg.Leaf != "deep" {
+		t.Errorf("expected included value, got %q", cfg.Leaf)
+	}
+
+	if abs := FindIncludeFileAbs("leaf"); abs != clean {
+		t.Errorf("expected tracker to record cleaned path %q, got %q", clean, abs)
+	}
+}
+
+// TestLoadWithDiamondInclude verifies that the same file included twice via
+// sibling branches (a diamond, not a cycle) stays legal.
+func TestLoadWithDiamondInclude(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "shared.yaml", "value: 42\n")
+
+	type Shared struct {
+		Value int `yaml:"value" description:"Shared value"`
+	}
+
+	type Config struct {
+		Left  Shared `yaml:"left" description:"Left branch"`
+		Right Shared `yaml:"right" description:"Right branch"`
+	}
+
+	main := writeTestFile(t, dir, "config.yaml", "left: !include shared.yaml\nright: !include shared.yaml\n")
+
+	var cfg Config
+	err := LoadFile(main, &cfg)
+	if err != nil {
+		t.Fatalf("diamond include must stay legal, got: %v", err)
+	}
+
+	if cfg.Left.Value != 42 || cfg.Right.Value != 42 {
+		t.Errorf("unexpected diamond values: %+v", cfg)
+	}
+}
+
+// TestLoadWithIncludeDepthLimit verifies that a chain longer than the
+// resolution depth limit is rejected with a dedicated error.
+func TestLoadWithIncludeDepthLimit(t *testing.T) {
+	dir := t.TempDir()
+
+	// Build a linear chain of maxIncludeDepth+1 files: f0 -> f1 -> ... -> fN.
+	for i := 0; i <= maxIncludeDepth; i++ {
+		content := "leaf: deep\n"
+		if i < maxIncludeDepth {
+			content = fmt.Sprintf("leaf: !include f%d.yaml\n", i+1)
+		}
+		writeTestFile(t, dir, fmt.Sprintf("f%d.yaml", i), content)
+	}
+
+	type Config struct {
+		Leaf string `yaml:"leaf" description:"Leaf value"`
+	}
+
+	main := writeTestFile(t, dir, "config.yaml", "leaf: !include f0.yaml\n")
+
+	var cfg Config
+	err := LoadFile(main, &cfg)
+	if err == nil {
+		t.Fatal("expected depth limit error, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "maximum !include depth") {
+		t.Errorf("unexpected error text: %v", err)
 	}
 }

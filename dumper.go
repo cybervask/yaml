@@ -8,11 +8,13 @@ import (
 )
 
 // Dump serializes the provided value into a YAML document byte slice.
-// It automatically detects fields marked with the structural include tag,
-// extracts their contents into separate external files, and places matching
-// `!include` markers in the primary document. All variadic formatting options
-// from the underlying library are preserved.
-func Dump(in any, opts ...Option) (out []byte, err error) {
+// It is a pure serialization entry point: no include processing happens here.
+// A field carrying the include tag flag ("...,include") is rejected by the
+// underlying marshaller with an error. To dump a config loaded with !include
+// directives — writing the include files back and emitting !include markers —
+// use [DumpWithInclude]. All variadic formatting options from the underlying
+// library are preserved.
+func Dump(in any, opts ...Option) ([]byte, error) {
 	var node yaml4.Node
 
 	// Marshal the Go structure into an intermediate YAML slice
@@ -24,11 +26,6 @@ func Dump(in any, opts ...Option) (out []byte, err error) {
 	// Unmarshal into an AST node tree for safe structural transformation
 	if err := yaml4.Unmarshal(data, &node); err != nil {
 		return nil, fmt.Errorf("failed to parse intermediate YAML to AST: %w", err)
-	}
-
-	// Isolate tagged fields and write them to external target files
-	if err := extractIncludes(&node, in, ".", ""); err != nil {
-		return nil, err
 	}
 
 	// Generate final document bytes for the main config file, applying format options
@@ -64,8 +61,8 @@ func NewDumper(w io.Writer, opts ...Option) (*Dumper, error) {
 
 // Dump writes the YAML encoding of v to the internal stream writer.
 //
-// Note: Consider augmenting this method if stream-encoded structures
-// also require external file extraction processing similar to [Dump].
+// Note: include processing is not performed here; use [DumpWithInclude] for
+// configs loaded with !include directives.
 func (dumper *Dumper) Dump(v any) error {
 	return dumper.d.Dump(v)
 }
