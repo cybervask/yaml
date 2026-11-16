@@ -17,7 +17,8 @@ func Help(v any) {
 // and generates an aligned, human-readable documentation string.
 //
 // The output contains the structural hierarchy of fields, descriptive documentation,
-// environment variable overrides, defaults, and associated validation constraint rules.
+// environment variable overrides, source-priority arbitration, defaults, and
+// associated validation constraint rules.
 func HelpStr(v any) string {
 	t := reflect.TypeOf(v)
 	if t == nil {
@@ -36,39 +37,87 @@ func HelpStr(v any) string {
 	type helpItem struct {
 		yamlPath string
 		desc     string
-		meta     string // Stores aggregated env, default, and validate rule annotations
+		meta     string // Stores aggregated env, priority, default, and validate rule annotations
 	}
 
 	var items []helpItem
 	var maxPathLen int
 
+	// visited tracks struct types on the current documentation path: a
+	// self-referential type stops the recursion silently, while a non-cyclic
+	// type repeated in two branches is documented both times.
+	visited := make(map[reflect.Type]struct{})
+
 	// Define recursive structural crawl lambda closure
-	var walk func(reflect.Type, int, string)
-	walk = func(currentType reflect.Type, indent int, prefix string) {
+	var walk func(reflect.Type, int)
+	walk = func(currentType reflect.Type, indent int) {
 		if currentType.Kind() == reflect.Pointer {
 			currentType = currentType.Elem()
 		}
 		if currentType.Kind() != reflect.Struct {
 			return
 		}
+		if _, seen := visited[currentType]; seen {
+			return
+		}
+
+		visited[currentType] = struct{}{}
+		defer delete(visited, currentType)
 
 		for i := 0; i < currentType.NumField(); i++ {
 			field := currentType.Field(i)
 
+			// Skip unexported fields: yaml4 never decodes them, so documenting
+			// them would be misleading (parity with dump_include.go).
+			if !field.IsExported() {
+				continue
+			}
+
 			// Extract the YAML key name or fall back to the lowercase field name
 			yamlName := field.Tag.Get("yaml")
+			inline := false
 			if yamlName == "" {
 				yamlName = strings.ToLower(field.Name)
 			} else {
 				// Extract the first element as the actual key name
 				yamlParts := strings.Split(yamlName, ",")
 				yamlName = yamlParts[0]
+				for _, opt := range yamlParts[1:] {
+					if opt == "inline" {
+						inline = true
+					}
+				}
+			}
+
+			// Skip fields the decoder never reads: a "-" tag excludes the
+			// field from YAML entirely, so documenting it would be misleading
+			// (same rationale as the unexported skip above).
+			if yamlName == "-" {
+				continue
+			}
+
+			// Evaluate inner properties depth cascades
+			fieldType := field.Type
+			if fieldType.Kind() == reflect.Pointer {
+				fieldType = fieldType.Elem()
+			}
+
+			// An inline struct field unfolds into the parent mapping in YAML,
+			// so its nested fields are documented at the parent's level
+			// instead of emitting a keyless line. An inline map has dynamic
+			// keys — there is nothing static to document.
+			if inline {
+				if fieldType.Kind() == reflect.Struct {
+					walk(fieldType, indent)
+				}
+
+				continue
 			}
 
 			// Generate structural spacing indentation tracking lines (e.g. "  tls:")
 			displayPath := strings.Repeat("  ", indent) + yamlName + ":"
-			if len(displayPath) > maxPathLen {
-				maxPathLen = len(displayPath)
+			if w := displayWidth(displayPath); w > maxPathLen {
+				maxPathLen = w
 			}
 
 			desc := field.Tag.Get("description")
@@ -77,6 +126,9 @@ func HelpStr(v any) string {
 			var metaParts []string
 			if env := field.Tag.Get("env"); env != "" {
 				metaParts = append(metaParts, fmt.Sprintf("env: %s", env))
+			}
+			if pr := field.Tag.Get("priority"); pr != "" {
+				metaParts = append(metaParts, fmt.Sprintf("priority: %s", pr))
 			}
 			if def := field.Tag.Get("default"); def != "" {
 				metaParts = append(metaParts, fmt.Sprintf("default: %s", def))
@@ -96,24 +148,74 @@ func HelpStr(v any) string {
 				meta:     meta,
 			})
 
-			// Evaluate inner properties depth cascades
-			fieldType := field.Type
-			if fieldType.Kind() == reflect.Pointer {
-				fieldType = fieldType.Elem()
-			}
-			if fieldType.Kind() == reflect.Struct {
-				walk(fieldType, indent+1, prefix+yamlName+".")
+			switch fieldType.Kind() {
+			case reflect.Struct:
+				walk(fieldType, indent+1)
+			case reflect.Slice, reflect.Array, reflect.Map:
+				// Document configurable struct elements of containers
+				// (slice/array/map); scalar elements carry no nested schema.
+				elem := fieldType.Elem()
+				if elem.Kind() == reflect.Pointer {
+					elem = elem.Elem()
+				}
+				if elem.Kind() == reflect.Struct {
+					walk(elem, indent+1)
+				}
 			}
 		}
 	}
 
-	walk(t, 0, "")
+	walk(t, 0)
 
-	// Format layout output strings aligning lines cleanly by the longest property key span width bounds
-	formatStr := fmt.Sprintf("%%-%ds %%s %%s\n", maxPathLen+2)
+	// Format layout output strings aligning lines cleanly by the longest
+	// property key span: the path column is padded by terminal display width
+	// (not bytes), so single-width non-ASCII keys keep the description column
+	// aligned; trailing whitespace is trimmed from every line.
 	for _, item := range items {
-		fmt.Fprintf(&sb, formatStr, item.yamlPath, item.desc, item.meta)
+		line := item.yamlPath +
+			strings.Repeat(" ", maxPathLen+2-displayWidth(item.yamlPath)) +
+			" " + item.desc + " " + item.meta
+		sb.WriteString(strings.TrimRight(line, " "))
+		sb.WriteByte('\n')
 	}
 
 	return sb.String()
+}
+
+// displayWidth returns the terminal display width of s for the help column
+// layout: East Asian wide/fullwidth runes count as two columns, every other
+// rune as one. Byte counting underpadded single-width non-ASCII keys (each
+// Cyrillic letter is two bytes) and misaligned the description column.
+func displayWidth(s string) int {
+	width := 0
+	for _, r := range s {
+		width += runeDisplayWidth(r)
+	}
+
+	return width
+}
+
+// runeDisplayWidth approximates the terminal width of r: the common East
+// Asian wide/fullwidth blocks occupy two terminal columns, every other rune
+// occupies one. Combining marks are not special-cased and count as one
+// column — they do not occur in the configuration keys this rendering targets.
+func runeDisplayWidth(r rune) int {
+	switch {
+	case r >= 0x1100 && r <= 0x115F, // Hangul Jamo
+		r == 0x2329 || r == 0x232A,   // CJK angle brackets
+		r >= 0x2E80 && r <= 0x303E,   // CJK radicals and symbols
+		r >= 0x3041 && r <= 0x33FF,   // Hiragana through CJK compatibility
+		r >= 0x3400 && r <= 0x4DBF,   // CJK unified ideographs extension A
+		r >= 0x4E00 && r <= 0x9FFF,   // CJK unified ideographs
+		r >= 0xA000 && r <= 0xA4CF,   // Yi syllables and radicals
+		r >= 0xAC00 && r <= 0xD7A3,   // Hangul syllables
+		r >= 0xF900 && r <= 0xFAFF,   // CJK compatibility ideographs
+		r >= 0xFE30 && r <= 0xFE4F,   // CJK compatibility forms
+		r >= 0xFF00 && r <= 0xFF60,   // fullwidth forms
+		r >= 0xFFE0 && r <= 0xFFE6,   // fullwidth sign forms
+		r >= 0x20000 && r <= 0x3FFFD: // CJK unified ideographs extension B+
+		return 2
+	}
+
+	return 1
 }

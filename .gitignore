@@ -5,3 +5,8 @@ coverage.txt
 **/*-back
 dec/**
 files/**
+*.md
+!README.md
+!README.*.md
+!KNOWN_PROBLEMS.md
+!KNOWN_PROBLEMS.*.md

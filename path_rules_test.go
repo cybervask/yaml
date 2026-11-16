@@ -20,6 +20,9 @@ func TestParsePathTokenSuccess(t *testing.T) {
 		{"single segment choice", "level.choice=dev,prod", "level", "choice", "dev,prod"},
 		{"deep target", "limits.cpu.min=1", "limits.cpu", "min", "1"},
 		{"flag rule required", "sub.required", "sub", "required", ""},
+		{"dotted regexp value", "msg.regexp=^a.b.c$", "msg", "regexp", "^a.b.c$"},
+		{"escaped dot regexp value", `msg.regexp=^a\.b$`, "msg", "regexp", `^a\.b$`},
+		{"parameter with equals and dot", "x.regexp=a=b.c", "x", "regexp", "a=b.c"},
 	}
 
 	for _, tt := range tests {
@@ -39,9 +42,11 @@ func TestParsePathTokenSuccess(t *testing.T) {
 
 // TestParsePathTokenRejection verifies that tokens without a known trailing
 // rule segment are rejected so that ordinary unknown rules stay silently
-// skipped (backward compatibility).
+// skipped (backward compatibility). A flag rule whose dot segments leave a
+// non-empty trailing tail behind is rejected too: attaching the tail to a
+// flag value would silently drop it.
 func TestParsePathTokenRejection(t *testing.T) {
-	for _, token := range []string{"min=5", "plain", "a.b.c", "x.no_such_rule=1"} {
+	for _, token := range []string{"min=5", "plain", "a.b.c", "x.no_such_rule=1", "t.endpoint.extra"} {
 		if _, _, _, ok := parsePathToken(token); ok {
 			t.Errorf("expected token %q to be rejected", token)
 		}
@@ -225,5 +230,142 @@ func TestPathRulesDeepTarget(t *testing.T) {
 	high.Runtime.Limits.CPU = 4
 	if err := Validate(&high); err != nil {
 		t.Errorf("expected valid config to pass, got: %v", err)
+	}
+}
+
+// TestPathRulesRegexpValueWithDots verifies end-to-end that dots inside a
+// path-rule value survive parsing: the full regexp is compiled, so a value
+// that only matches the truncated pattern is rejected while a matching one
+// passes. Before the fix, the back-off loop truncated the value to
+// "^a", silently weakening the pattern until any "a..." string passed.
+func TestPathRulesRegexpValueWithDots(t *testing.T) {
+	type Holder struct {
+		Body string `yaml:"body"`
+	}
+
+	type Config struct {
+		Msg Holder `yaml:"msg" validate:"body.regexp=^a.b.c$" description:"body"`
+	}
+
+	pass := Config{Msg: Holder{Body: "axbyc"}}
+	if err := Validate(&pass); err != nil {
+		t.Errorf("expected matching value to pass the full dotted regexp, got: %v", err)
+	}
+
+	fail := Config{Msg: Holder{Body: "aZZZ"}}
+	err := Validate(&fail)
+	if err == nil {
+		t.Fatal("expected non-matching value to be rejected, got nil")
+	}
+
+	if !strings.Contains(err.Error(), `field msg.body: value "aZZZ" does not match regular expression "^a.b.c$"`) {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestPathRulesThroughPointerField verifies that a path rule works through
+// pointer fields: the owner field and the intermediate target segment are
+// non-nil pointers, resolvePathTarget dereferences them along the walk, and
+// the rule fires on the dereferenced value. Characterization test for the
+// resolveStructField/findStructTarget deduplication: pins the deref of
+// non-nil pointer fields on path resolution.
+func TestPathRulesThroughPointerField(t *testing.T) {
+	type Inner struct {
+		MinLen int `yaml:"min_len"`
+	}
+
+	type Sub struct {
+		Inner *Inner `yaml:"inner"`
+	}
+
+	type Config struct {
+		Sub *Sub `yaml:"sub" validate:"inner.min_len.min=2"`
+	}
+
+	valid := Config{Sub: &Sub{Inner: &Inner{MinLen: 3}}}
+	if err := Validate(&valid); err != nil {
+		t.Errorf("expected dereferenced value to satisfy the path rule, got: %v", err)
+	}
+
+	low := Config{Sub: &Sub{Inner: &Inner{MinLen: 1}}}
+	err := Validate(&low)
+	if err == nil {
+		t.Fatal("expected path rule violation on the dereferenced value, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "field sub.inner.min_len: value 1 < min 2") {
+		t.Errorf("unexpected error text: %v", err)
+	}
+}
+
+// TestPathRulesRegexpEscapedDotValue verifies the escaped-dot regexp
+// end-to-end: "a.b" matches and "aXb" does not. The tag carries a doubled
+// backslash because reflect.StructTag unquotes tag values, so "\\." reaches
+// the engine as the regexp escape "\.". Before the fix, the value
+// was truncated to "^a\" (a trailing backslash), an invalid regexp, so the
+// matching value was falsely rejected with a syntax error.
+func TestPathRulesRegexpEscapedDotValue(t *testing.T) {
+	type Holder struct {
+		Body string `yaml:"body"`
+	}
+
+	type Config struct {
+		Msg Holder `yaml:"msg" validate:"body.regexp=^a\\.b$"`
+	}
+
+	pass := Config{Msg: Holder{Body: "a.b"}}
+	if err := Validate(&pass); err != nil {
+		t.Errorf("expected dotted value to match escaped-dot regexp, got: %v", err)
+	}
+
+	fail := Config{Msg: Holder{Body: "aXb"}}
+	if err := Validate(&fail); err == nil {
+		t.Fatal("expected non-matching value to be rejected, got nil")
+	}
+}
+
+// TestParseValidateTagPathRuleQuotedComma verifies that the path-rule token
+// scan tracks quotes: a comma inside a quoted value does not terminate the
+// token, so the full value survives into the path:<target> entry. Before the
+// fix, the scan stopped at the first comma and truncated the value to '^a.
+func TestParseValidateTagPathRuleQuotedComma(t *testing.T) {
+	rules := parseValidateTag(`msg.regexp='^a,b$'`)
+
+	if v := rules["path:msg"]; v != "regexp='^a,b$'" {
+		t.Errorf("expected path:msg entry with the full quoted value, got %q", v)
+	}
+
+	rules = parseValidateTag(`msg.regexp="^a,b$"`)
+
+	if v := rules["path:msg"]; v != `regexp="^a,b$"` {
+		t.Errorf("expected path:msg entry with the full double-quoted value, got %q", v)
+	}
+}
+
+// TestPathRulesQuotedCommaValue verifies the end-to-end behavior of a quoted
+// comma inside a path-rule regexp value: the pattern keeps its comma, so
+// "a,b" matches and "aXb" does not. Before the fix, the tokenizer truncated
+// the pattern at the comma, disabling the validation silently.
+func TestPathRulesQuotedCommaValue(t *testing.T) {
+	type inner struct {
+		Msg string `yaml:"msg"`
+	}
+	type Config struct {
+		Inner inner `yaml:"inner" validate:"msg.regexp='^a,b$'"`
+	}
+
+	valid := Config{Inner: inner{Msg: "a,b"}}
+	if err := Load([]byte("inner:\n  msg: a,b\n"), &valid); err != nil {
+		t.Fatalf("expected quoted comma pattern to accept \"a,b\", got: %v", err)
+	}
+
+	invalid := Config{Inner: inner{Msg: "aXb"}}
+	err := Load([]byte("inner:\n  msg: aXb\n"), &invalid)
+	if err == nil {
+		t.Fatal("expected quoted comma pattern to reject \"aXb\", got nil")
+	}
+
+	if !strings.Contains(err.Error(), `does not match regular expression "^a,b$"`) {
+		t.Errorf("unexpected error text: %v", err)
 	}
 }
