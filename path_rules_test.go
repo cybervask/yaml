@@ -56,7 +56,7 @@ func TestParsePathTokenRejection(t *testing.T) {
 // TestParseValidateTagPathRules verifies the tag tokenizer collects multiple
 // path rules under the path:<target> key and keeps ordinary rules intact.
 func TestParseValidateTagPathRules(t *testing.T) {
-	rules := parseValidateTag("required,min_len.min=0,max_len.max=64")
+	rules, _ := parseValidateTag("required,min_len.min=0,max_len.max=64")
 
 	if rules["required"] != "" {
 		t.Errorf("expected required flag to be preserved, got %q", rules["required"])
@@ -329,13 +329,13 @@ func TestPathRulesRegexpEscapedDotValue(t *testing.T) {
 // token, so the full value survives into the path:<target> entry. Before the
 // fix, the scan stopped at the first comma and truncated the value to '^a.
 func TestParseValidateTagPathRuleQuotedComma(t *testing.T) {
-	rules := parseValidateTag(`msg.regexp='^a,b$'`)
+	rules, _ := parseValidateTag(`msg.regexp='^a,b$'`)
 
 	if v := rules["path:msg"]; v != "regexp='^a,b$'" {
 		t.Errorf("expected path:msg entry with the full quoted value, got %q", v)
 	}
 
-	rules = parseValidateTag(`msg.regexp="^a,b$"`)
+	rules, _ = parseValidateTag(`msg.regexp="^a,b$"`)
 
 	if v := rules["path:msg"]; v != `regexp="^a,b$"` {
 		t.Errorf("expected path:msg entry with the full double-quoted value, got %q", v)

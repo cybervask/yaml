@@ -1038,7 +1038,7 @@ func TestValidateTagParsing(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := parseValidateTag(tt.tag)
+			result, _ := parseValidateTag(tt.tag)
 			if len(result) != len(tt.expected) {
 				t.Errorf("Expected %d rules, got %d: %+v", len(tt.expected), len(result), result)
 				return
