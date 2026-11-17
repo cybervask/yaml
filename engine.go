@@ -213,7 +213,10 @@ func setDefaultsValue(v reflect.Value) error {
 			defaultValStr, hasDefault := fieldType.Tag.Lookup("default")
 
 			if hasDefault && hasValidate {
-				tagRules := parseValidateTag(validateTag)
+				// Only the required/not_empty presence matters here; a duplicate
+				// required_if is a validate-pass configuration mistake and is
+				// reported there, where the field path is known.
+				tagRules, _ := parseValidateTag(validateTag)
 				if _, hasRequired := tagRules["required"]; hasRequired {
 					return fmt.Errorf("field %s is invalid: 'default' and 'required' are mutually exclusive", fieldType.Name)
 				}
@@ -616,10 +619,16 @@ var parameterizedRules = map[string]bool{
 
 // parseValidateTag tokenizes the validation tag string into separate rule mappings.
 // It isolates parameters even if they contain punctuation like commas (e.g. inside regex patterns or quoted values).
-func parseValidateTag(tag string) map[string]string {
+// A repeated required_if on one field is a configuration mistake: the map
+// keeps the last value exactly like before (help rendering and the
+// default-presence check are unaffected), and the error names both values
+// with the merge hint; the validation pass reports it with the field path.
+func parseValidateTag(tag string) (map[string]string, error) {
 	rules := make(map[string]string)
+	var dupErr error
+
 	if tag == "" {
-		return rules
+		return rules, nil
 	}
 
 	// isRuleStart checks if position idx starts with a known rule
@@ -780,10 +789,17 @@ func parseValidateTag(tag string) map[string]string {
 			i++
 		}
 
-		rules[foundRule] = strings.TrimSpace(value.String())
+		newValue := strings.TrimSpace(value.String())
+		if foundRule == "required_if" {
+			if existing, has := rules[foundRule]; has && dupErr == nil {
+				dupErr = fmt.Errorf("duplicate required_if rule: merge the conditions with \"&&\" or \"||\" into a single expression instead of repeating the rule (%q would silently replace %q)", newValue, existing)
+			}
+		}
+
+		rules[foundRule] = newValue
 	}
 
-	return rules
+	return rules, dupErr
 }
 
 // Validate executes deep, recursive structural checks across the application configuration models.
@@ -815,8 +831,10 @@ func Validate(ptr interface{}) error {
 // extractPathRules pulls every "path:<target>" entry out of a parsed rule map
 // and re-tokenizes the collected rule list through parseValidateTag. The path
 // entries are removed from the map so that they are never mistaken for rules
-// targeting the owner field itself.
-func extractPathRules(rules map[string]string) []pathRule {
+// targeting the owner field itself. A duplicate required_if inside a path
+// entry is the same configuration mistake as on a direct tag and aborts the
+// extraction with the parser error.
+func extractPathRules(rules map[string]string) ([]pathRule, error) {
 	var extracted []pathRule
 
 	for key, value := range rules {
@@ -825,13 +843,18 @@ func extractPathRules(rules map[string]string) []pathRule {
 		}
 
 		delete(rules, key)
+		parsed, err := parseValidateTag(value)
+		if err != nil {
+			return nil, err
+		}
+
 		extracted = append(extracted, pathRule{
 			Target: strings.TrimPrefix(key, "path:"),
-			Rules:  parseValidateTag(value),
+			Rules:  parsed,
 		})
 	}
 
-	return extracted
+	return extracted, nil
 }
 
 // resolvePathTarget walks the dot-separated target path from the owner value
@@ -1045,138 +1068,10 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 
 		// 1.2. Cross-field conditional validation execution (required_if) positioned at top tier level
 		if reqIfStr, hasReqIf := rules["required_if"]; hasReqIf {
-			if cond, ok := parseRequiredIfCondition(reqIfStr); ok {
-				targetFieldName := cond.target
-
-				// Quote stripping applies to canonical operands only: the
-				// deprecated colon form keeps its raw comparison payload.
-				expectedValue := cond.value
-				if cond.op != ":" {
-					expectedValue = stripRuleQuotes(expectedValue)
-				}
-
-				// Resolve the condition target: dot paths address the root
-				// struct, bare names match the enclosing struct first and
-				// fall back to the root so that top-level targets keep
-				// working for nested owners.
-				var targetField reflect.Value
-				yamlTargetName := targetFieldName
-
-				if strings.Contains(targetFieldName, ".") {
-					if resolved, found := resolvePathTarget(root, targetFieldName); found {
-						targetField = resolved
-						yamlTargetName = targetFieldName
-					}
-				} else if resolved, resolvedName := findStructTarget(scope, targetFieldName); resolved.IsValid() {
-					targetField = resolved
-					yamlTargetName = resolvedName
-				} else if !sameStructValue(scope, root) {
-					if resolved, resolvedName := findStructTarget(root, targetFieldName); resolved.IsValid() {
-						targetField = resolved
-						yamlTargetName = resolvedName
-					}
-				}
-
-				switch {
-				case targetField.IsValid() && !targetField.CanInterface():
-					// The name matched an unexported field: its value cannot
-					// be read back through reflect (Interface would panic), so
-					// the condition is unresolvable by configuration — report
-					// it like the other required_if configuration mistakes.
-					addRuleConfigErr("field %s: invalid required_if configuration: target field %q is not exported", currentPath, targetFieldName)
-				case targetField.IsValid():
-					// Pointer targets are unwrapped before formatting: a non-nil
-					// pointer compares by its element value, a nil one formats as
-					// the empty string (Go's "<nil>" placeholder could never match
-					// a rule token). The empty/not_empty macros below stay on the
-					// original targetField IsZero semantics.
-					formatTarget := targetField
-					if formatTarget.Kind() == reflect.Pointer {
-						if formatTarget.IsNil() {
-							formatTarget = reflect.ValueOf("")
-						} else {
-							formatTarget = formatTarget.Elem()
-						}
-					}
-
-					actualValueStr := fmt.Sprintf("%v", formatTarget.Interface())
-					if formatTarget.Kind() == reflect.String {
-						actualValueStr = formatTarget.String()
-					}
-
-					conditionMet := false
-
-					switch cond.op {
-					case "==", "!=":
-						// Case-insensitive comparison: YAML values arrive in any
-						// casing ("Client" must satisfy a role==client rule).
-						matched := strings.EqualFold(actualValueStr, expectedValue)
-						conditionMet = matched
-						if cond.op == "!=" {
-							conditionMet = !matched
-						}
-					case "~=", "^=":
-						re, reErr := regexp.Compile(expectedValue)
-						if reErr != nil {
-							// Configuration errors must not depend on the field
-							// value, same as the unknown-target error below.
-							addRuleConfigErr("field %s: invalid required_if configuration: invalid regular expression %q: %w", currentPath, expectedValue, reErr)
-
-							break
-						}
-
-						matched := re.MatchString(actualValueStr)
-						conditionMet = matched
-						if cond.op == "^=" {
-							conditionMet = !matched
-						}
-					case ":":
-						// Deprecated colon form: kept as-is for backward
-						// compatibility, including the empty/not_empty macros
-						// and the "!" negation prefix.
-						isNegation := strings.HasPrefix(expectedValue, "!")
-						cleanExpectedValue := strings.TrimPrefix(expectedValue, "!")
-
-						switch cleanExpectedValue {
-						case "empty":
-							conditionMet = targetField.IsZero()
-						case "not_empty":
-							conditionMet = !targetField.IsZero()
-						default:
-							// Case-insensitive comparison: YAML values arrive
-							// in any casing ("Client" must satisfy a
-							// role:client rule).
-							conditionMet = strings.EqualFold(actualValueStr, cleanExpectedValue)
-						}
-
-						if isNegation {
-							conditionMet = !conditionMet
-						}
-					}
-
-					if conditionMet && v.IsZero() {
-						// The reported operand is the actual target value for
-						// equality operators and the pattern for regex ones.
-						operand := actualValueStr
-						displayOp := cond.op
-						if cond.op == ":" {
-							displayOp = "="
-						} else if cond.op == "~=" || cond.op == "^=" {
-							operand = expectedValue
-						}
-
-						*errs = append(*errs, fmt.Errorf("field %s: is required when field %s%s%s", currentPath, yamlTargetName, displayOp, operand))
-					}
-				default:
-					addRuleConfigErr("field %s: invalid required_if configuration: target field %q not found", currentPath, targetFieldName)
-				}
-			} else {
-				// Malformed required_if: no operator at all. Report a
-				// configuration error regardless of the field value, same as
-				// the unknown-target and invalid-regexp siblings above; an
-				// empty value is the same malformed class.
-				addRuleConfigErr("field %s: invalid required_if configuration: missing comparison operator in %q (expected ==, !=, ~=, ^= or deprecated key:value)", currentPath, reqIfStr)
-			}
+			// Boolean expressions ("&&", "||", grouping parentheses) are
+			// lexed, parsed and evaluated by required_if_expr.go; the legacy
+			// single-condition form keeps its exact pre-expression behavior.
+			evaluateRequiredIf(reqIfStr, v, currentPath, root, scope, addRuleConfigErr, errs)
 		}
 
 		isCollectionElement := strings.Contains(currentPath, "[")
@@ -1772,7 +1667,12 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 				}
 
 				if validateTag, hasValidate := fieldType.Tag.Lookup("validate"); hasValidate {
-					for ruleKey, ruleValue := range parseValidateTag(validateTag) {
+					ownRules, ownErr := parseValidateTag(validateTag)
+					if ownErr != nil {
+						*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: %w", currentPath, ownErr))
+					}
+
+					for ruleKey, ruleValue := range ownRules {
 						merged[ruleKey] = ruleValue
 					}
 				}
@@ -1783,13 +1683,23 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 
 			var fieldRules map[string]string
 			if validateTag, hasValidate := fieldType.Tag.Lookup("validate"); hasValidate {
-				fieldRules = parseValidateTag(validateTag)
+				parsedRules, parseErr := parseValidateTag(validateTag)
+				if parseErr != nil {
+					*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: %w", nextPath, parseErr))
+				}
+
+				fieldRules = parsedRules
 			}
 
 			// Path-style rules ("min_len.min=0") apply to nested fields of this
 			// instance instead of the field itself; resolve each target and
 			// validate it with the full dot path so errors stay readable.
-			if pathRules := extractPathRules(fieldRules); len(pathRules) > 0 {
+			pathRules, pathErr := extractPathRules(fieldRules)
+			if pathErr != nil {
+				*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: %w", nextPath, pathErr))
+			}
+
+			if len(pathRules) > 0 {
 				for _, pr := range pathRules {
 					target, found := resolvePathTarget(fieldVal, pr.Target)
 					if !found {
