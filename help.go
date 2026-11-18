@@ -134,7 +134,14 @@ func HelpStr(v any) string {
 				metaParts = append(metaParts, fmt.Sprintf("default: %s", def))
 			}
 			if val := field.Tag.Get("validate"); val != "" {
-				metaParts = append(metaParts, fmt.Sprintf("validate: [%s]", val))
+				// The service break token is engine plumbing, not a schema
+				// constraint: it stays out of the documented rule list while
+				// every other segment keeps its original formatting. A tag
+				// reduced to nothing by the strip carries no constraint at
+				// all and is omitted entirely.
+				if stripped := stripBreakToken(val); stripped != "" {
+					metaParts = append(metaParts, fmt.Sprintf("validate: [%s]", stripped))
+				}
 			}
 
 			meta := ""
@@ -218,4 +225,108 @@ func runeDisplayWidth(r rune) int {
 	}
 
 	return 1
+}
+
+// stripBreakToken removes the standalone break service token from a raw
+// validate tag string so the help rendering never documents engine plumbing.
+// The scan is quote-aware and mirrors the validate tag tokenizer: commas,
+// spaces and tabs outside quoted segments separate the rule tokens, so the
+// word inside a parameter value ("choice=break", a required_if atom
+// "mode==break") is data and stays untouched.
+//
+// A tag without a standalone break token is returned bit-for-bit. Otherwise
+// every break segment is cut out together with one adjacent delimiter
+// (preferring the comma after it, falling back to the one before it), while
+// every remaining segment keeps its original formatting — the gluing never
+// rewrites the segments that stay.
+func stripBreakToken(tag string) string {
+	if !strings.Contains(tag, "break") {
+		return tag
+	}
+
+	// token is a candidate break segment: the span covers non-delimiter
+	// characters only (quotes included — a quoted "'a,break'" never equals
+	// the bare token).
+	type span struct{ start, end int }
+
+	var cuts []span
+
+	inQuotes := false
+	quoteChar := byte(0)
+	segStart := -1
+
+	for i := 0; i < len(tag); i++ {
+		ch := tag[i]
+
+		if inQuotes {
+			if ch == quoteChar {
+				inQuotes = false
+				quoteChar = 0
+			}
+
+			continue
+		}
+
+		switch {
+		case ch == '\'' || ch == '"':
+			inQuotes = true
+			quoteChar = ch
+			if segStart < 0 {
+				segStart = i
+			}
+		case ch == ',' || ch == ' ' || ch == '\t':
+			if segStart >= 0 {
+				if strings.TrimSpace(tag[segStart:i]) == "break" {
+					cuts = append(cuts, span{start: segStart, end: i})
+				}
+				segStart = -1
+			}
+		default:
+			if segStart < 0 {
+				segStart = i
+			}
+		}
+	}
+
+	if segStart >= 0 && strings.TrimSpace(tag[segStart:]) == "break" {
+		cuts = append(cuts, span{start: segStart, end: len(tag)})
+	}
+
+	if len(cuts) == 0 {
+		return tag
+	}
+
+	// cutOut widens one break segment by a single adjacent delimiter so the
+	// remaining segments do not fuse: the comma after the token wins, the
+	// one before it is the fallback. Leading spaces of the break token
+	// belong to its own delimiter run and go away with it; the neighbors'
+	// formatting is never rewritten.
+	cutOut := func(seg span) (int, int) {
+		start, end := seg.start, seg.end
+
+		j := seg.end
+		for j < len(tag) && (tag[j] == ' ' || tag[j] == '\t') {
+			j++
+		}
+		if j < len(tag) && tag[j] == ',' {
+			return start, j + 1
+		}
+
+		j = seg.start
+		for j > 0 && (tag[j-1] == ' ' || tag[j-1] == '\t') {
+			j--
+		}
+		if j > 0 && tag[j-1] == ',' {
+			start = j - 1
+		}
+
+		return start, end
+	}
+
+	for i := len(cuts) - 1; i >= 0; i-- {
+		start, end := cutOut(cuts[i])
+		tag = tag[:start] + tag[end:]
+	}
+
+	return tag
 }

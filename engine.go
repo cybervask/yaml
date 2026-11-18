@@ -607,7 +607,7 @@ func isKnownRule(name string, param bool) bool {
 var allRules = []string{
 	"mincount=", "maxcount=", "endpoint", "not_empty", "required",
 	"regexp=", "choice=", "minlen=", "maxlen=", "format=",
-	"min=", "max=", "url", "lt=", "gt=", "required_if=",
+	"min=", "max=", "url", "lt=", "gt=", "required_if=", "break",
 }
 
 // parameterizedRules marks the rules that require an "=value" argument.
@@ -617,18 +617,101 @@ var parameterizedRules = map[string]bool{
 	"max": true, "lt": true, "gt": true, "required_if": true,
 }
 
-// parseValidateTag tokenizes the validation tag string into separate rule mappings.
-// It isolates parameters even if they contain punctuation like commas (e.g. inside regex patterns or quoted values).
-// A repeated required_if on one field is a configuration mistake: the map
-// keeps the last value exactly like before (help rendering and the
-// default-presence check are unaffected), and the error names both values
-// with the merge hint; the validation pass reports it with the field path.
+// validateSegments holds the break-segmented rule mappings of one validate
+// tag: the head carries the unconditional rules (including the required_if
+// condition that precedes break), the tail carries the value rules that run
+// only when that condition is met. A tag without break fills the head only.
+type validateSegments struct {
+	head     map[string]string
+	tail     map[string]string
+	hasBreak bool
+}
+
+// fullRules returns the complete rule map of the tag: the head and, when a
+// break is present, the conditional tail merged together (tail values win on
+// a key collision, mirroring the map-replace semantics of a flat tag).
+// Consumers that do not apply the break semantics — the defaults-presence
+// check, path-rule extraction — see the full picture through this map.
+func (s validateSegments) fullRules() map[string]string {
+	merged := make(map[string]string, len(s.head)+len(s.tail))
+	for ruleKey, ruleValue := range s.head {
+		merged[ruleKey] = ruleValue
+	}
+	for ruleKey, ruleValue := range s.tail {
+		merged[ruleKey] = ruleValue
+	}
+
+	return merged
+}
+
+// breakSegments carries the break-segmented rules of one validate tag into
+// validateValue: the head must hold the required_if condition governing the
+// tail; the tail value rules apply only when that condition is met.
+type breakSegments struct {
+	head map[string]string
+	tail map[string]string
+}
+
+// parseValidateTag tokenizes the validation tag string into a single flat
+// rule mapping. It isolates parameters even if they contain punctuation like
+// commas (e.g. inside regex patterns or quoted values). A repeated
+// required_if on one field is a configuration mistake: the map keeps the
+// last value exactly like before (help rendering and the default-presence
+// check are unaffected), and the error names both values with the merge
+// hint; the validation pass reports it with the field path.
+//
+// Break configuration mistakes (a break without a preceding required_if, a
+// second break, a required_if after break, break inside a path entry) are
+// reported through the error as well; see parseValidateTagSegments.
 func parseValidateTag(tag string) (map[string]string, error) {
-	rules := make(map[string]string)
-	var dupErr error
+	segments, err := parseValidateTagSegments(tag)
+
+	return segments.fullRules(), err
+}
+
+// parseValidateTagSegments tokenizes the validation tag string into the
+// break-segmented rule mappings. A standalone break token splits the tag:
+// rules parsed before it land in the head, rules parsed after it in the
+// tail. The break itself is a service token and never lands in a rule map.
+// The tail condition is the required_if parsed before break, so a tag with
+// break must carry exactly one required_if in its head: a break without a
+// preceding required_if, a second break token and a required_if placed after
+// break are configuration mistakes reported as the error (parsing continues,
+// so the returned segments stay as complete as possible). break inside a
+// path entry ("item.break") is rejected too: the tail condition governs the
+// owner field's own value rules, not the rules of a nested target. A
+// distorted "break=..." form is a mistake as well: break takes no value, and
+// the '='-tail would otherwise be silently skipped as an unknown token.
+//
+// Path-style rules are never conditional: they address nested fields rather
+// than the owner value, so a path token after break is collected into the
+// head and applies unconditionally. The placement is bounded by the
+// parameter scanner: a path token directly after required_if is swallowed
+// into the condition operand (a comma before a path token does not stop the
+// parameter scan — only a rule start does), so its rule is lost; place path
+// rules before required_if or after break.
+//
+// The break token is recognized only at a rule position: inside a
+// parameter value ("choice=break", a required_if atom "mode==break") the
+// word is data, not the service token.
+func parseValidateTagSegments(tag string) (validateSegments, error) {
+	segments := validateSegments{
+		head: make(map[string]string),
+		tail: make(map[string]string),
+	}
+	rules := segments.head
+	var segErr error
+
+	// reportSegErr keeps the first configuration mistake: later ones never
+	// overwrite it, matching the single-error surface of the flat parser.
+	reportSegErr := func(err error) {
+		if segErr == nil {
+			segErr = err
+		}
+	}
 
 	if tag == "" {
-		return rules, nil
+		return segments, nil
 	}
 
 	// isRuleStart checks if position idx starts with a known rule
@@ -685,6 +768,31 @@ func parseValidateTag(tag string) (map[string]string, error) {
 			}
 		}
 
+		if foundRule == "break" {
+			// The service break token: it splits the tag instead of landing
+			// in a rule map. Configuration mistakes are reported, parsing
+			// continues into the tail.
+			if i+ruleLen < n && tag[i+ruleLen] == '=' {
+				// A distorted "break=..." form: the flag-rule scan accepts
+				// '=' as the next character to keep flag rules uniform, but
+				// the service token takes no value, and the '='-tail is
+				// silently skipped as an unknown token. The split semantics
+				// stay (the tail keeps parsing), the mistake surfaces.
+				reportSegErr(fmt.Errorf("break rule takes no value: the service token is written as a standalone break"))
+			}
+			if segments.hasBreak {
+				reportSegErr(fmt.Errorf("duplicate break rule: a tag may carry a single break token"))
+			} else if _, hasReqIf := segments.head["required_if"]; !hasReqIf {
+				reportSegErr(fmt.Errorf("break rule must be preceded by a required_if rule: the tail rules run only when that condition is met"))
+			}
+
+			segments.hasBreak = true
+			rules = segments.tail
+			i += ruleLen
+
+			continue
+		}
+
 		if foundRule == "" {
 			// Try the path-rule syntax: <nested.path>.<rule>=<value>
 			// The token scan tracks quotes like the parameterized branch
@@ -715,6 +823,16 @@ func parseValidateTag(tag string) (map[string]string, error) {
 			}
 
 			if target, rule, value, ok := parsePathToken(tag[i:tokenEnd]); ok {
+				if rule == "break" {
+					// "item.break": the service token on a nested target is
+					// the same configuration-mistake class as the misplaced
+					// forms above.
+					reportSegErr(fmt.Errorf("break rule inside a path entry is not supported: the tail condition governs the owner field's value rules only"))
+					i = tokenEnd
+
+					continue
+				}
+
 				entry := rule
 				if value != "" {
 					entry += "=" + value
@@ -790,16 +908,24 @@ func parseValidateTag(tag string) (map[string]string, error) {
 		}
 
 		newValue := strings.TrimSpace(value.String())
+		if foundRule == "required_if" && segments.hasBreak {
+			// The tail condition is defined by the required_if preceding
+			// break: a later one is a configuration mistake and stays
+			// unrecorded — nothing would govern it.
+			reportSegErr(fmt.Errorf("required_if rule must be placed before break: the tail condition is defined by the required_if preceding it"))
+
+			continue
+		}
 		if foundRule == "required_if" {
-			if existing, has := rules[foundRule]; has && dupErr == nil {
-				dupErr = fmt.Errorf("duplicate required_if rule: merge the conditions with \"&&\" or \"||\" into a single expression instead of repeating the rule (%q would silently replace %q)", newValue, existing)
+			if existing, has := rules[foundRule]; has && segErr == nil {
+				segErr = fmt.Errorf("duplicate required_if rule: merge the conditions with \"&&\" or \"||\" into a single expression instead of repeating the rule (%q would silently replace %q)", newValue, existing)
 			}
 		}
 
 		rules[foundRule] = newValue
 	}
 
-	return rules, dupErr
+	return segments, segErr
 }
 
 // Validate executes deep, recursive structural checks across the application configuration models.
@@ -811,7 +937,7 @@ func Validate(ptr interface{}) error {
 	}
 	var errs []error
 	visited := make(map[uintptr]struct{})
-	validateValue(v.Elem(), "", nil, v.Elem(), v.Elem(), &errs, visited, false)
+	validateValue(v.Elem(), "", nil, v.Elem(), v.Elem(), &errs, visited, false, nil)
 	if len(errs) > 0 {
 		var sb strings.Builder
 		for i, err := range errs {
@@ -1022,8 +1148,15 @@ func parseRequiredIfCondition(expr string) (requiredIfCondition, bool) {
 // are reported once on the collection itself and never repeated per element,
 // while value faults still report at every element in place.
 //
+// The brk argument carries the break segmentation of the tag on the field
+// that declares it (nil otherwise): the required_if preceding break is
+// evaluated exactly once here, and the tail value rules join the effective
+// rules only when the condition is met. Conditional tail rules never reach
+// the collection elements: their configuration mistakes are reported on the
+// collection itself, and the condition is not re-evaluated per element.
+//
 //nolint:gocyclo // Reason: massive tag boundaries processing engine requires extensive conditional logical blocks.
-func validateValue(v reflect.Value, currentPath string, rules map[string]string, root, scope reflect.Value, errs *[]error, visited map[uintptr]struct{}, inheritedRules bool) {
+func validateValue(v reflect.Value, currentPath string, rules map[string]string, root, scope reflect.Value, errs *[]error, visited map[uintptr]struct{}, inheritedRules bool, brk *breakSegments) {
 	// A nil pointer is kept as-is: it is not dereferenced (would panic) and
 	// not dropped here (that silently skipped required, not_empty and
 	// required_if on unset pointer fields). The rule block below is nil-safe
@@ -1043,6 +1176,11 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 		v = v.Elem()
 	}
 
+	// breakInherited holds the rules collection elements receive when the
+	// tag carries break: the unconditional head minus the evaluated
+	// required_if. nil keeps the plain inheritance of the flat rule map.
+	var breakInherited map[string]string
+
 	if len(rules) > 0 {
 		// Rule-declaration mistakes (unknown required_if targets, invalid
 		// condition patterns, conflicting boundaries, an empty choice list,
@@ -1056,6 +1194,58 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 			}
 
 			*errs = append(*errs, fmt.Errorf(format, args...))
+		}
+
+		// Break segmentation: the required_if preceding break defines the
+		// tail condition and is evaluated exactly once, here, with its
+		// regular semantics — configuration mistakes are always reported,
+		// and the required error is appended when the condition is met on a
+		// zero field.
+		if brk != nil {
+			conditionMet := false
+			if reqIfStr, hasReqIf := brk.head["required_if"]; hasReqIf {
+				conditionMet = evaluateRequiredIf(reqIfStr, v, currentPath, root, scope, addRuleConfigErr, errs)
+			}
+
+			if !conditionMet {
+				// The accepted trade-off of the break contract: when the
+				// condition is false the tail value rules are skipped
+				// entirely — including non-empty field values. Their
+				// configuration mistakes still surface through the audit
+				// below, so they never depend on the condition.
+				auditBreakTailConfig(brk.head, brk.tail, v, currentPath, addRuleConfigErr)
+			}
+
+			// The effective rules for the value phase below: the
+			// unconditional head minus the already-evaluated required_if,
+			// joined by the tail when the condition is met.
+			headOnly := make(map[string]string, len(brk.head))
+			for ruleKey, ruleValue := range brk.head {
+				if ruleKey == "required_if" {
+					// Evaluated above exactly once; a second evaluation
+					// would duplicate its reports.
+					continue
+				}
+
+				headOnly[ruleKey] = ruleValue
+			}
+
+			rules = headOnly
+			if conditionMet {
+				rules = make(map[string]string, len(headOnly)+len(brk.tail))
+				for ruleKey, ruleValue := range headOnly {
+					rules[ruleKey] = ruleValue
+				}
+				for ruleKey, ruleValue := range brk.tail {
+					rules[ruleKey] = ruleValue
+				}
+			}
+
+			// Collection elements inherit the unconditional head rules only:
+			// the tail stays conditional, and the condition is not
+			// re-evaluated per element.
+			breakInherited = headOnly
+			brk = nil
 		}
 
 		// 1.1. Basic check for unconditional field requirement
@@ -1667,28 +1857,46 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 				}
 
 				if validateTag, hasValidate := fieldType.Tag.Lookup("validate"); hasValidate {
-					ownRules, ownErr := parseValidateTag(validateTag)
+					ownSegments, ownErr := parseValidateTagSegments(validateTag)
 					if ownErr != nil {
 						*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: %w", currentPath, ownErr))
 					}
 
-					for ruleKey, ruleValue := range ownRules {
+					if ownSegments.hasBreak {
+						// A break in the wrapper's own tag cannot split the
+						// merged rule set: the inherited rules carry no
+						// segmentation of their own, so a tail condition
+						// would be undefined. The declaration is a
+						// configuration mistake; the rules still apply as
+						// one flat set below.
+						*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: break rule is not supported in the own validate tag of a Value wrapper field", currentPath))
+					}
+
+					for ruleKey, ruleValue := range ownSegments.fullRules() {
 						merged[ruleKey] = ruleValue
 					}
 				}
 
-				validateValue(fieldVal, currentPath, merged, root, v, errs, visited, false)
+				validateValue(fieldVal, currentPath, merged, root, v, errs, visited, false, nil)
 				continue
 			}
 
 			var fieldRules map[string]string
+			var fieldBreak *breakSegments
 			if validateTag, hasValidate := fieldType.Tag.Lookup("validate"); hasValidate {
-				parsedRules, parseErr := parseValidateTag(validateTag)
+				segments, parseErr := parseValidateTagSegments(validateTag)
 				if parseErr != nil {
 					*errs = append(*errs, fmt.Errorf("field %s: invalid validator configuration: %w", nextPath, parseErr))
 				}
 
-				fieldRules = parsedRules
+				fieldRules = segments.head
+				if segments.hasBreak {
+					// The flat map handed to the path extraction below is a
+					// full copy: the extraction mutates the map it is given,
+					// and the segmentation maps must stay intact.
+					fieldRules = segments.fullRules()
+					fieldBreak = &breakSegments{head: segments.head, tail: segments.tail}
+				}
 			}
 
 			// Path-style rules ("min_len.min=0") apply to nested fields of this
@@ -1718,19 +1926,29 @@ func validateValue(v reflect.Value, currentPath string, rules map[string]string,
 					}
 
 					targetPath := nextPath + "." + pr.Target
-					validateValue(target, targetPath, pr.Rules, root, v, errs, visited, false)
+					validateValue(target, targetPath, pr.Rules, root, v, errs, visited, false, nil)
 				}
 			}
 
-			validateValue(fieldVal, nextPath, fieldRules, root, v, errs, visited, false)
+			validateValue(fieldVal, nextPath, fieldRules, root, v, errs, visited, false, fieldBreak)
 		}
 	case reflect.Slice:
+		elemRules := rules
+		if breakInherited != nil {
+			elemRules = breakInherited
+		}
+
 		for i := 0; i < v.Len(); i++ {
-			validateValue(v.Index(i), fmt.Sprintf("%s[%d]", currentPath, i), rules, root, v.Index(i), errs, visited, true)
+			validateValue(v.Index(i), fmt.Sprintf("%s[%d]", currentPath, i), elemRules, root, v.Index(i), errs, visited, true, nil)
 		}
 	case reflect.Map:
+		elemRules := rules
+		if breakInherited != nil {
+			elemRules = breakInherited
+		}
+
 		for _, key := range v.MapKeys() {
-			validateValue(v.MapIndex(key), fmt.Sprintf("%s[%v]", currentPath, key.Interface()), rules, root, v.MapIndex(key), errs, visited, true)
+			validateValue(v.MapIndex(key), fmt.Sprintf("%s[%v]", currentPath, key.Interface()), elemRules, root, v.MapIndex(key), errs, visited, true, nil)
 		}
 
 	default:
@@ -1792,4 +2010,386 @@ func stripRuleQuotes(s string) string {
 	}
 
 	return s
+}
+
+// auditBreakTailConfig reports the configuration mistakes of the
+// break-suppressed tail rules: when the required_if preceding break is not
+// met, the tail never joins the value phase, yet its configuration mistakes
+// must still surface regardless of the condition (the same
+// configuration-errors-never-depend-on-the-field-value class as the
+// conflicting boundaries, mutual exclusion and empty choice checks of
+// validateValue). The audit mirrors the value-phase configuration checks of
+// validateValue — the same checks, the same field-kind filters and the same
+// message texts, evaluated with no value comparisons: only declarations are
+// judged. That includes the tail regexp and the tail format token: the
+// pattern is pre-compiled with the value-phase quote stripping (never
+// matched) and an unknown format token names no reachable check — both are
+// declaration faults, reported with the value-phase messages.
+//
+// Boundary conflicts that span the head and the tail (min/max in one
+// segment, gt/lt in the other) are the same declaration conflict the flat
+// engine reports regardless of the field value, so the audit reports them
+// regardless of the condition; when the condition is met, validateValue
+// names the pair exactly once on the merged rule set. A cross-segment
+// min>max comparison needs the kind-specific parse of the head limit and
+// stays the business of validateValue: it surfaces once the condition is
+// met. Head-only pairs never reach the audit — the head always joins the
+// value phase, so validateValue reports them regardless of the condition
+// already.
+func auditBreakTailConfig(head, tail map[string]string, v reflect.Value, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	minStr, hasMin := tail["min"]
+	maxStr, hasMax := tail["max"]
+	ltStr, hasLt := tail["lt"]
+	gtStr, hasGt := tail["gt"]
+
+	if (hasMin && hasGt) || (hasMax && hasLt) {
+		addRuleConfigErr("field %s: invalid validator configuration: conflicting boundaries metrics", currentPath)
+	}
+
+	// The head×tail pairs of the same conflicting class: the merged rule set
+	// carries them the moment the condition is met, and the flat engine
+	// reports the pair regardless of the field value — a not-met silence
+	// would hide a declaration the user believes is active.
+	_, headHasMin := head["min"]
+	_, headHasMax := head["max"]
+	_, headHasLt := head["lt"]
+	_, headHasGt := head["gt"]
+	if (headHasMin && hasGt) || (headHasGt && hasMin) || (headHasMax && hasLt) || (headHasLt && hasMax) {
+		addRuleConfigErr("field %s: invalid validator configuration: conflicting boundaries metrics", currentPath)
+	}
+
+	_, hasFormat := tail["format"]
+	_, hasEndpoint := tail["endpoint"]
+	_, hasURL := tail["url"]
+
+	if hasFormat || hasEndpoint || hasURL {
+		mutIdx := 0
+		if hasFormat {
+			mutIdx++
+		}
+		if hasEndpoint {
+			mutIdx++
+		}
+		if hasURL {
+			mutIdx++
+		}
+		if mutIdx > 1 {
+			addRuleConfigErr("field %s: invalid configuration: format rules are strictly mutually exclusive", currentPath)
+		}
+	}
+
+	// The tail regexp is a declaration too: the value phase compiles the
+	// pattern for string fields before any matching, so the audit
+	// pre-compiles it with the same quote stripping and the same message —
+	// the field value itself is never matched here.
+	if expr, hasRegexp := tail["regexp"]; hasRegexp && v.Kind() == reflect.String {
+		expr = stripRuleQuotes(expr)
+		if _, err := regexp.Compile(expr); err != nil {
+			addRuleConfigErr("field %s: invalid regular expression syntax %q: %w", currentPath, expr, err)
+		}
+	}
+
+	// An unknown format token is rejected by the value phase for string
+	// fields; the audit mirrors that check, the kind filter included — a
+	// format rule on a kind the value phase never reaches stays silent here
+	// as well.
+	if formatStr, hasFormat := tail["format"]; hasFormat && v.Kind() == reflect.String {
+		switch formatStr {
+		case "ip", "ipv4", "ipv6", "uuid", "hex":
+			// Known token: nothing to audit.
+
+		default:
+			addRuleConfigErr("field %s: unknown format %q (expected ip, ipv4, ipv6, uuid or hex)", currentPath, formatStr)
+		}
+	}
+
+	if choiceStr, hasChoice := tail["choice"]; hasChoice && len(parseChoiceValues(choiceStr)) == 0 {
+		addRuleConfigErr("field %s: invalid validator configuration: empty choice list", currentPath)
+	}
+
+	minLenStr, hasMinLen := tail["minlen"]
+	maxLenStr, hasMaxLen := tail["maxlen"]
+	minCountStr, hasMinCount := tail["mincount"]
+	maxCountStr, hasMaxCount := tail["maxcount"]
+
+	// The limit checks keep the field-kind filters of validateValue: a limit
+	// whose value phase would never run for this kind is not audited either.
+	switch {
+	case v.Kind() == reflect.String:
+		auditStringTailLimits(minLenStr, maxLenStr, hasMinLen, hasMaxLen, currentPath, addRuleConfigErr)
+		auditUnsupportedTailBoundaries(v, hasMin || hasMax || hasLt || hasGt, currentPath, addRuleConfigErr)
+
+	case v.Kind() == reflect.Slice || v.Kind() == reflect.Map:
+		auditCollectionTailLimits(minCountStr, maxCountStr, hasMinCount, hasMaxCount, currentPath, addRuleConfigErr)
+
+	case v.Type() == durationType:
+		auditDurationTailLimits(minStr, maxStr, ltStr, gtStr, hasMin, hasMax, hasLt, hasGt, currentPath, addRuleConfigErr)
+
+	case v.Kind() >= reflect.Int && v.Kind() <= reflect.Int64:
+		auditIntTailLimits(minStr, maxStr, ltStr, gtStr, hasMin, hasMax, hasLt, hasGt, currentPath, addRuleConfigErr)
+
+	case v.Kind() >= reflect.Uint && v.Kind() <= reflect.Uint64:
+		auditUintTailLimits(minStr, maxStr, ltStr, gtStr, hasMin, hasMax, hasLt, hasGt, currentPath, addRuleConfigErr)
+
+	case v.Kind() == reflect.Float32 || v.Kind() == reflect.Float64:
+		auditFloatTailLimits(minStr, maxStr, ltStr, gtStr, hasMin, hasMax, hasLt, hasGt, currentPath, addRuleConfigErr)
+
+	default:
+		auditUnsupportedTailBoundaries(v, hasMin || hasMax || hasLt || hasGt, currentPath, addRuleConfigErr)
+	}
+}
+
+// auditStringTailLimits mirrors the minlen/maxlen configuration checks of
+// validateValue for string fields: unparseable and negative limits and a
+// minlen greater than maxlen are reported, no value comparison happens.
+func auditStringTailLimits(minLenStr, maxLenStr string, hasMinLen, hasMaxLen bool, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	var minLen, maxLen int
+
+	if hasMinLen {
+		n, err := strconv.Atoi(minLenStr)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: minlen %q: %w", currentPath, minLenStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: minlen (%d) cannot be negative", currentPath, n)
+
+		default:
+			minLen = n
+		}
+	}
+	if hasMaxLen {
+		n, err := strconv.Atoi(maxLenStr)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: maxlen %q: %w", currentPath, maxLenStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: maxlen (%d) cannot be negative", currentPath, n)
+
+		default:
+			maxLen = n
+		}
+	}
+
+	if hasMinLen && hasMaxLen && minLen > maxLen {
+		addRuleConfigErr("field %s: invalid validator configuration: minlen (%d) cannot be greater than maxlen (%d)", currentPath, minLen, maxLen)
+	}
+}
+
+// auditCollectionTailLimits mirrors the mincount/maxcount configuration
+// checks of validateValue for slice and map fields.
+func auditCollectionTailLimits(minCountStr, maxCountStr string, hasMinCount, hasMaxCount bool, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	var minCount, maxCount int
+
+	if hasMinCount {
+		n, err := strconv.Atoi(minCountStr)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: mincount %q: %w", currentPath, minCountStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: mincount (%d) cannot be negative", currentPath, n)
+
+		default:
+			minCount = n
+		}
+	}
+	if hasMaxCount {
+		n, err := strconv.Atoi(maxCountStr)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: maxcount %q: %w", currentPath, maxCountStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: maxcount (%d) cannot be negative", currentPath, n)
+
+		default:
+			maxCount = n
+		}
+	}
+
+	if hasMinCount && hasMaxCount && minCount > maxCount {
+		addRuleConfigErr("field %s: invalid validator configuration: mincount (%d) cannot be greater than maxcount (%d)", currentPath, minCount, maxCount)
+	}
+}
+
+// auditDurationTailLimits mirrors the min/max/lt/gt configuration checks of
+// validateValue for time.Duration fields.
+func auditDurationTailLimits(minStr, maxStr, ltStr, gtStr string, hasMin, hasMax, hasLt, hasGt bool, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	var minVal, maxVal time.Duration
+
+	if hasMin {
+		d, err := time.ParseDuration(minStr)
+		if err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: min %q: %w", currentPath, minStr, err)
+		} else {
+			minVal = d
+		}
+	}
+	if hasMax {
+		d, err := time.ParseDuration(maxStr)
+		if err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: max %q: %w", currentPath, maxStr, err)
+		} else {
+			maxVal = d
+		}
+	}
+	if hasLt {
+		if _, err := time.ParseDuration(ltStr); err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: lt %q: %w", currentPath, ltStr, err)
+		}
+	}
+	if hasGt {
+		if _, err := time.ParseDuration(gtStr); err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: gt %q: %w", currentPath, gtStr, err)
+		}
+	}
+
+	if hasMin && hasMax && minVal > maxVal {
+		addRuleConfigErr("field %s: configuration error: min %v > max %v", currentPath, minVal, maxVal)
+	}
+}
+
+// auditIntTailLimits mirrors the min/max/lt/gt configuration checks of
+// validateValue for signed integer fields.
+func auditIntTailLimits(minStr, maxStr, ltStr, gtStr string, hasMin, hasMax, hasLt, hasGt bool, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	var minVal, maxVal int64
+
+	if hasMin {
+		n, err := strconv.ParseInt(minStr, 10, 64)
+		if err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: min %q: %w", currentPath, minStr, err)
+		} else {
+			minVal = n
+		}
+	}
+	if hasMax {
+		n, err := strconv.ParseInt(maxStr, 10, 64)
+		if err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: max %q: %w", currentPath, maxStr, err)
+		} else {
+			maxVal = n
+		}
+	}
+	if hasLt {
+		if _, err := strconv.ParseInt(ltStr, 10, 64); err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: lt %q: %w", currentPath, ltStr, err)
+		}
+	}
+	if hasGt {
+		if _, err := strconv.ParseInt(gtStr, 10, 64); err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: gt %q: %w", currentPath, gtStr, err)
+		}
+	}
+
+	if hasMin && hasMax && minVal > maxVal {
+		addRuleConfigErr("field %s: configuration error: min %d > max %d", currentPath, minVal, maxVal)
+	}
+}
+
+// auditUintTailLimits mirrors the min/max/lt/gt configuration checks of
+// validateValue for unsigned integer fields, including the negative-limit
+// rejection that exists only in the unsigned branch.
+func auditUintTailLimits(minStr, maxStr, ltStr, gtStr string, hasMin, hasMax, hasLt, hasGt bool, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	var minVal, maxVal uint64
+
+	if hasMin {
+		n, err := strconv.ParseInt(minStr, 10, 64)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: min %q: %w", currentPath, minStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: min (%d) cannot be negative", currentPath, n)
+
+		default:
+			minVal = uint64(n)
+		}
+	}
+	if hasMax {
+		n, err := strconv.ParseInt(maxStr, 10, 64)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: max %q: %w", currentPath, maxStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: max (%d) cannot be negative", currentPath, n)
+
+		default:
+			maxVal = uint64(n)
+		}
+	}
+	if hasLt {
+		n, err := strconv.ParseInt(ltStr, 10, 64)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: lt %q: %w", currentPath, ltStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: lt (%d) cannot be negative", currentPath, n)
+		}
+	}
+	if hasGt {
+		n, err := strconv.ParseInt(gtStr, 10, 64)
+		switch {
+		case err != nil:
+			addRuleConfigErr("field %s: invalid validator configuration: gt %q: %w", currentPath, gtStr, err)
+
+		case n < 0:
+			addRuleConfigErr("field %s: invalid validator configuration: gt (%d) cannot be negative", currentPath, n)
+		}
+	}
+
+	if hasMin && hasMax && minVal > maxVal {
+		addRuleConfigErr("field %s: configuration error: min %d > max %d", currentPath, minVal, maxVal)
+	}
+}
+
+// auditFloatTailLimits mirrors the min/max/lt/gt configuration checks of
+// validateValue for floating-point fields.
+func auditFloatTailLimits(minStr, maxStr, ltStr, gtStr string, hasMin, hasMax, hasLt, hasGt bool, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	var minVal, maxVal float64
+
+	if hasMin {
+		f, err := strconv.ParseFloat(minStr, 64)
+		if err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: min %q: %w", currentPath, minStr, err)
+		} else {
+			minVal = f
+		}
+	}
+	if hasMax {
+		f, err := strconv.ParseFloat(maxStr, 64)
+		if err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: max %q: %w", currentPath, maxStr, err)
+		} else {
+			maxVal = f
+		}
+	}
+	if hasLt {
+		if _, err := strconv.ParseFloat(ltStr, 64); err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: lt %q: %w", currentPath, ltStr, err)
+		}
+	}
+	if hasGt {
+		if _, err := strconv.ParseFloat(gtStr, 64); err != nil {
+			addRuleConfigErr("field %s: invalid validator configuration: gt %q: %w", currentPath, gtStr, err)
+		}
+	}
+
+	if hasMin && hasMax && minVal > maxVal {
+		addRuleConfigErr("field %s: configuration error: min %f > max %f", currentPath, minVal, maxVal)
+	}
+}
+
+// auditUnsupportedTailBoundaries mirrors the unsupported-kind branch of the
+// validateValue boundary checks: boundary rules declared on a kind that
+// carries no numeric value (except collections, whose elements receive the
+// boundaries through the traversal) are a configuration mistake.
+func auditUnsupportedTailBoundaries(v reflect.Value, hasBoundaries bool, currentPath string, addRuleConfigErr func(format string, args ...any)) {
+	kind := v.Kind()
+	if hasBoundaries && kind != reflect.Slice && kind != reflect.Map && kind != reflect.Array {
+		addRuleConfigErr("field %s: boundary validators are not supported for kind %s", currentPath, kind)
+	}
 }
