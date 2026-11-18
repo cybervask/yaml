@@ -560,20 +560,23 @@ func evalRequiredIfCondition(cond requiredIfCondition, root, scope reflect.Value
 // unquoted "(", is evaluated as a boolean expression instead. A met
 // condition on a zero field appends the required error to errs;
 // configuration mistakes go through addRuleConfigErr.
-func evaluateRequiredIf(reqIfStr string, v reflect.Value, currentPath string, root, scope reflect.Value, addRuleConfigErr func(format string, args ...any), errs *[]error) {
+//
+// The returned met flag reports whether the condition is true — regardless
+// of the validated field's own value. The break segmentation consumes it to
+// decide whether the tail rules join the value phase; the ordinary rule
+// block ignores it.
+func evaluateRequiredIf(reqIfStr string, v reflect.Value, currentPath string, root, scope reflect.Value, addRuleConfigErr func(format string, args ...any), errs *[]error) bool {
 	if !isRequiredIfExpression(reqIfStr) {
-		evaluateRequiredIfSingleCondition(reqIfStr, v, currentPath, root, scope, addRuleConfigErr, errs)
-
-		return
+		return evaluateRequiredIfSingleCondition(reqIfStr, v, currentPath, root, scope, addRuleConfigErr, errs)
 	}
 
-	evaluateRequiredIfExpression(reqIfStr, v, currentPath, root, scope, addRuleConfigErr, errs)
+	return evaluateRequiredIfExpression(reqIfStr, v, currentPath, root, scope, addRuleConfigErr, errs)
 }
 
 // evaluateRequiredIfSingleCondition evaluates the legacy single-condition
 // required_if form. It reproduces the pre-expression behavior bit-for-bit,
 // including the "is required when field ..." message layout.
-func evaluateRequiredIfSingleCondition(reqIfStr string, v reflect.Value, currentPath string, root, scope reflect.Value, addRuleConfigErr func(format string, args ...any), errs *[]error) {
+func evaluateRequiredIfSingleCondition(reqIfStr string, v reflect.Value, currentPath string, root, scope reflect.Value, addRuleConfigErr func(format string, args ...any), errs *[]error) bool {
 	cond, ok := parseRequiredIfCondition(reqIfStr)
 	if !ok {
 		// Malformed required_if: no operator at all. Report a
@@ -582,13 +585,15 @@ func evaluateRequiredIfSingleCondition(reqIfStr string, v reflect.Value, current
 		// empty value is the same malformed class.
 		addRuleConfigErr("field %s: invalid required_if configuration: missing comparison operator in %q (expected ==, !=, ~=, ^= or deprecated key:value)", currentPath, reqIfStr)
 
-		return
+		return false
 	}
 
 	res := evalRequiredIfCondition(cond, root, scope, currentPath, addRuleConfigErr)
 	if res.met && v.IsZero() {
 		*errs = append(*errs, fmt.Errorf("field %s: is required when field %s%s%s", currentPath, res.yamlName, res.displayOp, res.operand))
 	}
+
+	return res.met
 }
 
 // evaluateRequiredIfExpression lexes, parses and evaluates the boolean
@@ -599,19 +604,19 @@ func evaluateRequiredIfSingleCondition(reqIfStr string, v reflect.Value, current
 // repeated faulty atom (e.g. "nosuch==1&&nosuch==2") would surface the same
 // mistake twice — identical reports (same format and arguments) are emitted
 // once per expression, with the original formatting untouched.
-func evaluateRequiredIfExpression(reqIfStr string, v reflect.Value, currentPath string, root, scope reflect.Value, addRuleConfigErr func(format string, args ...any), errs *[]error) {
+func evaluateRequiredIfExpression(reqIfStr string, v reflect.Value, currentPath string, root, scope reflect.Value, addRuleConfigErr func(format string, args ...any), errs *[]error) bool {
 	tokens, lexErr := lexRequiredIfExpression(reqIfStr)
 	if lexErr != nil {
 		addRuleConfigErr("field %s: invalid required_if configuration: %v", currentPath, lexErr)
 
-		return
+		return false
 	}
 
 	node, parseErr := parseRequiredIfExpression(tokens, reqIfStr)
 	if parseErr != nil {
 		addRuleConfigErr("field %s: invalid required_if configuration: %v", currentPath, parseErr)
 
-		return
+		return false
 	}
 
 	reported := make(map[string]struct{})
@@ -625,7 +630,10 @@ func evaluateRequiredIfExpression(reqIfStr string, v reflect.Value, currentPath 
 		addRuleConfigErr(format, args...)
 	}
 
-	if node.eval(root, scope, currentPath, reportOnce) && v.IsZero() {
+	met := node.eval(root, scope, currentPath, reportOnce)
+	if met && v.IsZero() {
 		*errs = append(*errs, fmt.Errorf("field %s: is required when %s", currentPath, reqIfStr))
 	}
+
+	return met
 }
